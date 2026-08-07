@@ -2,7 +2,8 @@
 Main pipeline for TE classification.
 
 Orchestrates: FASTA ingestion -> alphabet detection -> optional translation
--> HMM search -> classification -> BLAST pass-2 -> SQLite + TSV output.
+-> HMM search -> classification -> pass-2 similarity search -> SQLite + TSV
+output.
 """
 
 import argparse
@@ -25,6 +26,7 @@ from .classifier import (classify_sequences, export_classification_tsv,
                        store_classifications, reconcile_classifications,
                        DB_CONFIGS)
 from .blast_pass2 import blast_pass2
+from .minimap import minimap2_version
 from . import bath_search
 
 
@@ -210,6 +212,56 @@ def parse_args():
              "per-database classifications and their summed normalized "
              "scores in descending order of evidence strength.",
     )
+
+    # pass-2 options
+    parser.add_argument(
+        "-dp2", "--disable-pass2",
+        action="store_true", default=False,
+        help="Skip pass-2 similarity search (HMM-only classification)",
+    )
+    parser.add_argument(
+        "-rule", "--pass2-rule",
+        default="80-80-80", type=str, metavar="I-C-L",
+        help="Pass-2 threshold as identity-coverage-length. For the blast "
+             "aligner: pident, qcovs, and alignment-length filters (80-80-80 "
+             "matches TEsorter2 master). For minimap2: I drives "
+             "classify_ltr_paf_fast --min-pid; C drives BOTH --min-qcov and "
+             "--min-tcov; L is parsed for grammar compatibility but is not "
+             "consumed by classify_ltr_paf_fast [default: %(default)s]",
+    )
+    parser.add_argument(
+        "--pass2-classified-fasta",
+        default=None, type=str, metavar="FASTA",
+        help="Optional FASTA of previously-classified elements to augment "
+             "the pass-2 target database. Headers must be like "
+             ">id#Order/Superfamily/Clade",
+    )
+    parser.add_argument(
+        "--minimap2-extra",
+        default="", type=str, metavar="STR",
+        help="Extra flags passed through to minimap2 (advanced) "
+             "[default: empty]",
+    )
+    parser.add_argument(
+        "--pass2-aligner",
+        choices=["blast", "minimap2"], default="blast",
+        help="Aligner for the pass-2 similarity search. 'blast' (default) "
+             "reproduces TEsorter2 master's blastn pass-2 (qcovs + "
+             "alignment-length filter, clade=unknown); 'minimap2' uses the "
+             "PAF qcov+tcov path and inherits the best target's full "
+             "classification. Both share the same -rule and the "
+             "--pass2-classified-fasta external-pool merge.",
+    )
+    parser.add_argument(
+        "--blast-task",
+        choices=["megablast", "dc-megablast"], default="megablast",
+        help="blastn -task for the 'blast' pass-2 aligner. megablast "
+             "(default) is fastest and tuned for near-identical matches; "
+             "dc-megablast uses discontiguous seeds — slower but more "
+             "sensitive to diverged/cross-species matches. Ignored when "
+             "--pass2-aligner=minimap2 [default: %(default)s]",
+    )
+
     parser.add_argument(
         "--no-tesorter-outputs",
         action="store_true",
@@ -574,16 +626,37 @@ def main():
     log.info(f"  Reconciled across {len(per_db_results)} databases: "
              f"{len(reconciled)} sequences")
 
-    # --- BLAST pass-2 ---
+    # --- pass-2 similarity search ---
     all_results = list(reconciled)
-    if not args.pass_1_only and all_classifications:
-        log.info("--- BLAST pass-2 ---")
+    if (not args.pass_1_only and not args.disable_pass2
+            and all_classifications):
+        try:
+            p2_id, p2_cov, p2_len = args.pass2_rule.split("-")
+            p2_id = float(p2_id)
+            p2_cov = float(p2_cov)
+            p2_len = float(p2_len)
+        except ValueError:
+            raise SystemExit(
+                f"--pass2-rule must be I-C-L (three numbers separated by '-'), "
+                f"got {args.pass2_rule!r}"
+            )
+
+        log.info(f"--- pass-2 ({args.pass2_aligner}) ---")
+        if args.pass2_aligner == "minimap2":
+            minimap2_version()
         blast_cls = blast_pass2(
             args.sequence, conn,
             hmm_classifications=all_classifications,
             seq_type="nucl",
             n_processors=args.processors,
+            min_identity=p2_id,
+            min_coverage=p2_cov,
+            min_length=p2_len,
             outdir=outdir,
+            pass2_classified_fasta=args.pass2_classified_fasta,
+            minimap2_extra=args.minimap2_extra,
+            aligner=args.pass2_aligner,
+            blast_task=args.blast_task,
         )
 
         if blast_cls:

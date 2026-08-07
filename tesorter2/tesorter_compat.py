@@ -71,7 +71,29 @@ def parse_args():
                         help="Minimum normalized score [default: 0.1]")
     parser.add_argument("-dp2", "--disable-pass2", action="store_true",
                         default=False,
-                        help="Do not run BLAST pass-2 classification")
+                        help="Do not run pass-2 classification")
+    parser.add_argument("-rule", "--pass2-rule", type=str, default="80-80-80",
+                        metavar="I-C-L",
+                        help="Pass-2 threshold identity-coverage-length. "
+                             "blast: pident, qcovs, and alignment-length "
+                             "filters. minimap2: I drives "
+                             "classify_ltr_paf_fast --min-pid; C drives both "
+                             "--min-qcov and --min-tcov; L unused "
+                             "[default: 80-80-80]")
+    parser.add_argument("--pass2-aligner", choices=["blast", "minimap2"],
+                        default="blast",
+                        help="Aligner for the pass-2 similarity search. "
+                             "blast (default) reproduces TEsorter2 master's "
+                             "blastn pass-2; minimap2 uses the PAF qcov+tcov "
+                             "path [default: blast]")
+    parser.add_argument("--pass2-classified-fasta", type=str, default=None,
+                        metavar="FASTA",
+                        help="Optional FASTA of previously-classified elements "
+                             "to augment pass-2 target DB. Headers must be "
+                             "like >id#Order/Superfamily/Clade")
+    parser.add_argument("--minimap2-extra", type=str, default="",
+                        metavar="STR",
+                        help="Extra flags passed through to minimap2")
     parser.add_argument("-nolib", "--no-library", action="store_true",
                         default=False,
                         help="Do not generate RepeatMasker library file")
@@ -234,15 +256,30 @@ def main():
             export_classification_tsv(results, cls_out)
             log.info(f"Classification: {len(results)} sequences -> {cls_out}")
 
-            # BLAST pass-2
+            # pass-2 similarity search
             if not args.disable_pass2 and args.seq_type == "nucl":
+                try:
+                    p2_id, p2_cov, p2_len = args.pass2_rule.split("-")
+                    p2_id = float(p2_id)
+                    p2_cov = float(p2_cov)
+                    p2_len = float(p2_len)
+                except ValueError:
+                    log.error(f"--pass2-rule must be I-C-L, got {args.pass2_rule!r}")
+                    sys.exit(1)
+
                 hmm_cls = {r["id"]: r for r in results}
                 blast_cls = blast_pass2(
                     args.sequence, conn,
                     hmm_classifications=hmm_cls,
                     seq_type="nucl",
                     n_processors=args.processors,
+                    min_identity=p2_id,
+                    min_coverage=p2_cov,
+                    min_length=p2_len,
                     outdir=args.tmp_dir or os.path.dirname(prefix) or ".",
+                    pass2_classified_fasta=args.pass2_classified_fasta,
+                    minimap2_extra=args.minimap2_extra,
+                    aligner=args.pass2_aligner,
                 )
 
                 if blast_cls:
@@ -250,7 +287,7 @@ def main():
                                           mode=run_mode)
                     all_results = results + blast_cls
                     export_classification_tsv(all_results, cls_out)
-                    log.info(f"BLAST pass-2: {len(blast_cls)} additional -> {cls_out}")
+                    log.info(f"minimap2 pass-2: {len(blast_cls)} additional -> {cls_out}")
 
     # Generate TEsorter-format output files
     if config and results:
