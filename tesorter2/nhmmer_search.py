@@ -30,6 +30,8 @@ import os
 import shutil
 import subprocess
 
+from .hmm import open_hmm_text
+
 log = logging.getLogger(__name__)
 
 # Column positions in `nhmmer --tblout`. Validated against the header before
@@ -73,7 +75,7 @@ def require_binaries():
 def model_lengths(hmm_path):
     """{model name: profile length} straight from the HMM file."""
     lengths, name = {}, None
-    with open(hmm_path, errors="replace") as f:
+    with open_hmm_text(hmm_path) as f:
         for line in f:
             if line.startswith("NAME"):
                 name = line.split(None, 1)[1].strip()

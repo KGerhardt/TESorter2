@@ -37,9 +37,14 @@ pip install git+https://github.com/KGerhardt/TEsorter2.git
 
 ### Databases
 
-The HMM databases (REXdb, GyDB2, LINE, TIR, AnnoSINE) ship inside the package, as they do in
-TEsorter, so there is no download step and no configuration: `tesorter2 sequences input.fasta` works
-straight after install.
+The HMM databases (REXdb, GyDB2, LINE, TIR, AnnoSINE, a Pfam-derived TE set and four Dfam curated
+collections) ship inside the package, as they do in TEsorter, so there is no download step and no
+configuration: `tesorter2 sequences input.fasta` works straight after install.
+
+The Dfam collections ship gzipped. An HMM file is text and gives back ~84% of its size, and nothing
+has to unpack them: pyHMMER's `HMMFile` detects gzip, and HMMER's `nhmmer` reads a `.gz` path
+directly. So there is no first-use step, nothing is written into the package directory at run time,
+and concurrent jobs sharing one install cannot race over a half-written file.
 
 > **GyDB2 is shipped modified.** Its 2009-era profiles carried no `COMPO` record, which HMMER and
 > pyHMMER tolerate but stricter HMMER3 readers (notably `nail`) reject outright. The bundled copy
@@ -202,10 +207,29 @@ Requires at least one database.
  
 ### Multiple databases
  
-**Every bundled database is searched by default.** Omitting `-d` searches rexdb, gydb, line, tir
-and sine together; pass `-d rexdb,gydb` to restrict the set. Each database classifies
-independently and reconciliation resolves them afterwards, so more databases means more evidence
-rather than more ambiguity — at proportionally more compute.
+**Most bundled databases are searched by default.** Omitting `-d` searches rexdb, gydb, line, tir,
+sine, sine-animals, pfam-te and dfam-core; pass `-d rexdb,gydb` to restrict the set, or
+`--max-search` to force every alias including the ones that are off by default (`sine-so` and the
+deeper Dfam collections). Each primary database classifies independently and reconciliation resolves
+them afterwards, so more databases means more evidence rather than more ambiguity — at
+proportionally more compute.
+
+#### Subordinate databases
+
+The four Dfam collections (`dfam-core`, `dfam-extended`, `dfam-deep`, `dfam-complete`) are a
+**fallback layer, not competitors**. They run after every primary database has classified what it
+can, against only the sequences that were left unclassified, and they are reconciled among
+themselves rather than entering the cross-database vote. The protein cascade is the stronger
+evidence where it speaks, so a DNA consensus model is never given the chance to outvote it — it only
+fills gaps. The layer runs before BLAST pass-2, so the weaker nucleotide-similarity pass sees only
+what profile evidence could not reach.
+
+The aliases are **hierarchical**: `-d dfam-deep` searches `dfam-core`, `dfam-extended` and
+`dfam-deep`. The files themselves are disjoint, so nothing is searched twice.
+
+Each collection is the previous one plus the next tranche of models, ordered by measured cost per
+correctly recovered sequence, so each step costs roughly an order of magnitude more per label than
+the one before it. `dfam-core` is on by default; the rest are opt-in.
 
 The three reconciliation stages:
  
@@ -300,7 +324,7 @@ tesorter2 <sequence> [options]
 |---|---|---|
 | `sequence` | — | Input FASTA (TE library, or genome with `--genome`) |
 | `-d`, `--database` | all bundled | Comma-separated database aliases or paths |
-| `--max-search` | off | Force the full database set even alongside an explicit `-d` |
+| `--max-search` | off | Search every database alias, including those off by default |
 | `-o`, `--outdir` | `{input}.TEsorter2` | Output directory |
 | `--db-dir` | bundled | Directory holding the HMM databases (see Installation) |
 | `--dna-engine` | `nhmmer` | Engine for DNA databases (`nhmmer` or `hmmsearch`) |

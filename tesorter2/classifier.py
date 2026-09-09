@@ -94,6 +94,22 @@ PFAMTE_CONFIG = {
     "clade_restrict": None,
 }
 
+# Dfam curated DNA consensus models, cut into cost tiers by build_dfam_dbs.py,
+# which writes their names in the REXdb convention exactly as the Pfam TE
+# add-on does -- so the REXdb parser reads them unchanged. No `structures`: a
+# whole-element consensus is not a domain architecture, and these models make
+# no claim about which domains an element carries. One config serves all four
+# collections; they are disjoint slices of one library, not different
+# databases.
+DFAMDB_CONFIG = {
+    "name": "dfam",
+    "domain_remap": {},
+    "overlap_aware": False,
+    "structures": {},
+    "clade_parser": "rexdb",
+    "clade_restrict": None,
+}
+
 DB_CONFIGS = {
     "rexdb": REXDB_CONFIG,
     "gydb": GYDB_CONFIG,
@@ -103,6 +119,10 @@ DB_CONFIGS = {
     "sine-animals": SINE_CONFIG,
     "sine-so": SINE_CONFIG,
     "pfam-te": PFAMTE_CONFIG,
+    "dfam-core": DFAMDB_CONFIG,
+    "dfam-extended": DFAMDB_CONFIG,
+    "dfam-deep": DFAMDB_CONFIG,
+    "dfam-complete": DFAMDB_CONFIG,
 }
 
 # GyDB clade map: loaded from GyDB2.hmm.info (ships alongside GyDB2.hmm)

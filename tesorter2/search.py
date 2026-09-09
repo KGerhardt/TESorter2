@@ -271,7 +271,11 @@ def legacy_search(hmms, seq_block, optimized=None):
         all_hits.extend(_collect_hits(results_iter))
 
     if outliers:
-        names = [h.name for h in outliers]
+        # pyhmmer returns HMM names as bytes, so this log line has to decode
+        # before joining -- it only fires when a database has outlier-sized
+        # models, which is why it went unnoticed.
+        names = [h.name.decode() if isinstance(h.name, (bytes, bytearray))
+                 else str(h.name) for h in outliers]
         log.info(f"    {len(outliers)} outlier models (parallel=targets): "
                  f"{', '.join(n[:40] for n in names[:3])}"
                  f"{'...' if len(names) > 3 else ''}")

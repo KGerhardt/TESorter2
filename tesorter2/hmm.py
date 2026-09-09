@@ -6,6 +6,7 @@ builds OptimizedProfiles once at startup, and provides the dict-based
 access needed for ad-hoc model subset searches in pass 2.
 """
 
+import gzip
 from io import BytesIO
 
 import pyhmmer.easel as easel
@@ -23,6 +24,30 @@ _ALPHABET_MAP = {
 }
 
 
+def open_hmm_text(hmm_path):
+    """Open an HMM file for text reading, transparently through gzip.
+
+    The databases ship compressed: an HMM file is text and gives back ~84% of
+    its size, and both readers that matter handle it unaided -- pyhmmer's
+    HMMFile detects gzip, and HMMER 3.4's nhmmer binary reads a .gz path
+    directly (verified: same model count scanned from either). So there is no
+    unpacking step, nothing written into the package directory at first use,
+    and no race between concurrent jobs sharing an install.
+    """
+    if str(hmm_path).endswith(".gz"):
+        return gzip.open(hmm_path, "rt", errors="replace")
+    return open(hmm_path, errors="replace")
+
+
+def read_hmm_bytes(hmm_path):
+    """Whole HMM file as bytes, decompressing a .gz."""
+    if str(hmm_path).endswith(".gz"):
+        with gzip.open(hmm_path, "rb") as fh:
+            return fh.read()
+    with open(hmm_path, "rb") as fh:
+        return fh.read()
+
+
 def peek_alphabet(hmm_path):
     """
     Detect the alphabet of an HMM database by reading the first ALPH field.
@@ -36,7 +61,7 @@ def peek_alphabet(hmm_path):
     Raises:
         ValueError: if no ALPH line found or unrecognized alphabet
     """
-    with open(hmm_path) as f:
+    with open_hmm_text(hmm_path) as f:
         for line in f:
             if line.startswith("ALPH"):
                 alph_str = line.split()[1].strip()
@@ -71,8 +96,7 @@ def load_hmms(hmm_path):
     Returns:
         list of plan7.HMM objects
     """
-    with open(hmm_path, "rb") as fh:
-        return list(plan7.HMMFile(BytesIO(fh.read())))
+    return list(plan7.HMMFile(BytesIO(read_hmm_bytes(hmm_path))))
 
 
 def build_optimized_profiles(hmms, alphabet=None):

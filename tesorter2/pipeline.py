@@ -24,6 +24,7 @@ from .results import (create_db, store_sequences,
 from .classifier import (export_classification_tsv, store_classifications,
                        reconcile_classifications)
 from .blast_pass2 import blast_pass2
+from .subset import subset_fasta
 from .hierarchical_search import ENGINES, DEFAULT_STAGES
 
 
@@ -59,10 +60,43 @@ DB_ALIASES = {
     # a whole fold rather than a TE superfamily, so breadth has to be priced
     # before it can be trusted in a default run.
     "pfam-te":  "kenjis_pfam_TE.hmm",
+    # Dfam curated, cut into four collections by measured cost per correct
+    # label against RepBase. Every model clears a 95% order-accuracy gate
+    # (one-sided Wilson bound), and the collections are disjoint: the aliases
+    # below stack, so a model stored in more than one file would be searched
+    # more than once.
+    "dfam-core":     "Dfam_curated_core.hmm.gz",
+    "dfam-extended": "Dfam_curated_extended.hmm.gz",
+    "dfam-deep":     "Dfam_curated_deep.hmm.gz",
+    "dfam-complete": "Dfam_curated_complete.hmm.gz",
 }
 
+# Hierarchical aliases: naming a level implies the cheaper levels beneath it.
+# `dfam-deep` is 106 models on its own and means nothing without the 346 in
+# front of it, so asking for depth asks for everything up to that depth. Kept
+# as an expansion over disjoint files rather than as four cumulative files,
+# which would store the core models four times.
+DB_EXPANSIONS = {
+    "dfam-extended": ("dfam-core", "dfam-extended"),
+    "dfam-deep":     ("dfam-core", "dfam-extended", "dfam-deep"),
+    "dfam-complete": ("dfam-core", "dfam-extended", "dfam-deep",
+                      "dfam-complete"),
+}
+
+# Databases that run AFTER the primary arm has classified what it can, against
+# only what it left. They are a fallback layer, not a competitor: the protein
+# cascade is 97.8% accurate at order level on what it classifies, so letting a
+# DNA model outvote it would trade a good call for a worse one. Running them
+# second also keeps them out of the cross-database vote entirely.
+SUBORDINATE_DBS = ("dfam-core", "dfam-extended", "dfam-deep", "dfam-complete")
+
 # Aliases that exist but are not searched unless named with -d.
-NON_DEFAULT_DBS = ("sine-so", "pfam-te")
+#
+# pfam-te and dfam-core are now default-ON. dfam-core costs about a third of
+# the AnnoSINE search that already ships and recovers ~5,000 RepBase sequences
+# the protein cascade misses, at 26 wrong labels; the deeper collections cost
+# 3x, 6x and 12x that and are opt-in.
+NON_DEFAULT_DBS = ("sine-so", "dfam-extended", "dfam-deep", "dfam-complete")
 
 
 def resolve_db(name, db_dir=None):
@@ -247,17 +281,52 @@ def main():
     # Resolve databases. Omitting -d searches everything: each database
     # classifies independently and reconciliation resolves them afterwards, so
     # more databases is more evidence rather than more ambiguity.
-    if args.max_search or not args.database:
+    if args.max_search:
+        # Literally everything, which is what the flag says. The default set
+        # below is deliberately smaller.
+        db_names = list(DB_ALIASES.keys())
+    elif not args.database:
         db_names = [k for k in DB_ALIASES.keys() if k not in NON_DEFAULT_DBS]
         if args.include_sine_so:
             db_names.append("sine-so")
     else:
         db_names = [s.strip() for s in args.database.split(",")]
 
+    # Expand hierarchical aliases, preserving order and dropping duplicates so
+    # naming both dfam-core and dfam-deep searches core exactly once.
+    expanded = []
+    for name in db_names:
+        for part in DB_EXPANSIONS.get(name, (name,)):
+            if part not in expanded:
+                expanded.append(part)
+    if expanded != db_names:
+        added = [n for n in expanded if n not in db_names]
+        if added:
+            log.info("Hierarchical aliases pulled in: %s", ", ".join(added))
+    db_names = expanded
+
+    # A database the user NAMED must exist -- a typo or a missing file should
+    # stop the run rather than silently narrow it. One that is merely on by
+    # default must not: the Dfam collections are a large optional download, and
+    # an installation without them should still run, just without that layer.
+    explicit = bool(args.database) and not args.max_search
     db_dir = get_db_dir(args.db_dir)
     db_paths = {}
+    absent = []
     for name in db_names:
-        db_paths[name] = resolve_db(name, db_dir=db_dir)
+        try:
+            db_paths[name] = resolve_db(name, db_dir=db_dir)
+        except FileNotFoundError:
+            if explicit:
+                raise
+            absent.append(name)
+    if absent:
+        log.warning("Not installed, skipping: %s", ", ".join(absent))
+        db_names = [n for n in db_names if n not in absent]
+    if not db_names:
+        raise SystemExit(
+            f"No databases available under {db_dir}. Point --db-dir or "
+            f"TESORTER2_DB at a database directory.")
 
     log.info(f"Input: {args.sequence}")
     log.info(f"Databases: {', '.join(db_names)}")
@@ -327,8 +396,27 @@ def main():
     # BLAST pass-2, the combined export -- is shared and engine-agnostic.
     from . import hierarchical_search
 
+    # Two rounds. The primary databases compete with each other and are
+    # reconciled by weighted vote; the subordinate ones (Dfam) then run against
+    # only what is still unclassified. Splitting the rounds is what makes them
+    # subordinate: they never enter the vote, so they cannot outweigh a protein
+    # call, and they never see a sequence the primary arm already resolved.
+    sub_names = [n for n in db_names if n in SUBORDINATE_DBS]
+    primary_names = [n for n in db_names if n not in SUBORDINATE_DBS]
+    if sub_names and not primary_names:
+        # Nothing to fall through from; run them as the primary arm instead of
+        # searching an empty remainder.
+        log.info("Only subordinate databases requested; running them directly")
+        primary_names, sub_names = sub_names, []
+    if sub_names:
+        log.info("Primary: %s", ", ".join(primary_names))
+        log.info("Subordinate (searched only on what the primary arm leaves): "
+                 "%s", ", ".join(sub_names))
+
     per_db_results = hierarchical_search.run_cascade(
-        conn, args.sequence, db_paths, db_alphabets, outdir,
+        conn, args.sequence,
+        {n: db_paths[n] for n in primary_names},
+        {n: db_alphabets[n] for n in primary_names}, outdir,
         protein_stages=[x.strip() for x in args.stages.split(",")],
         n_workers=args.processors,
         compat_rounding=args.compat_tesorter_rounding,
@@ -339,6 +427,54 @@ def main():
 
     log.info("Indexing hits tables")
     index_hits_tables(conn)
+
+    # Reconcile across databases via hierarchical weighted vote
+    reconciled = reconcile_classifications(per_db_results)
+    all_classifications = {r["id"]: r for r in reconciled}
+    log.info(f"  Reconciled across {len(per_db_results)} databases: "
+             f"{len(reconciled)} sequences")
+
+    # --- Subordinate round ---
+    # Ahead of BLAST pass-2 on purpose: this is profile evidence against curated
+    # models, pass-2 is nucleotide similarity to sequences the run itself just
+    # labelled. The weaker evidence should see only what the stronger could not
+    # reach.
+    if sub_names:
+        remaining = [n for n in nucl_lengths if n not in all_classifications]
+        log.info("--- Subordinate databases: %s ---", ", ".join(sub_names))
+        if not remaining:
+            log.info("  Nothing unclassified; skipping")
+        else:
+            sub_fa = os.path.join(outdir, "subordinate_input.fa")
+            n_written, _ = subset_fasta(args.sequence, sub_fa,
+                                        set(remaining), exclude=False)
+            log.info("  %d sequences unclassified by the primary arm",
+                     n_written)
+            sub_per_db = hierarchical_search.run_cascade(
+                conn, sub_fa,
+                {n: db_paths[n] for n in sub_names},
+                {n: db_alphabets[n] for n in sub_names}, outdir,
+                protein_stages=[x.strip() for x in args.stages.split(",")],
+                n_workers=args.processors,
+                compat_rounding=args.compat_tesorter_rounding,
+                compat_voting=args.compat_tesorter_voting,
+                mask_stops=args.mask_stops,
+                min_clade_delta=args.min_clade_delta,
+                seq_type=args.seq_type)
+            index_hits_tables(conn)
+            # Reconciled among themselves only -- the collections are disjoint
+            # slices of one library, so two of them hitting the same sequence
+            # is ordinary agreement, not a cross-database conflict.
+            sub_reconciled = reconcile_classifications(sub_per_db)
+            gained = 0
+            for r in sub_reconciled:
+                if r["id"] not in all_classifications:
+                    all_classifications[r["id"]] = r
+                    reconciled.append(r)
+                    gained += 1
+            per_db_results.update(sub_per_db)
+            log.info("  Recovered %d sequences the primary arm left "
+                     "unclassified", gained)
 
     for name, results in per_db_results.items():
         if not results:
@@ -365,12 +501,6 @@ def main():
                 domain_files=False,
                 keep=None,
             )
-
-    # Reconcile across databases via hierarchical weighted vote
-    reconciled = reconcile_classifications(per_db_results)
-    all_classifications = {r["id"]: r for r in reconciled}
-    log.info(f"  Reconciled across {len(per_db_results)} databases: "
-             f"{len(reconciled)} sequences")
 
     # --- BLAST pass-2 ---
     all_results = list(reconciled)
