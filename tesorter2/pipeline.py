@@ -445,17 +445,21 @@ def main():
 
     rounds = {"primary": 0, "subordinate": 1}
 
-    def _search(fasta, names, tag):
+    def _search(fasta, names, tag, subset=None):
         """One search round, partitioned or not, over the named databases."""
         paths = {n: db_paths[n] for n in names}
         alphas = {n: db_alphabets[n] for n in names}
         if n_groups and n_groups > 1:
             from . import partition
+            # Sequence lengths are already in hand from reading the input, so
+            # planning needs neither an index query nor an index build.
+            lengths = (nucl_lengths if subset is None
+                       else {k: nucl_lengths[k] for k in subset})
             return partition.run_partitioned(
                 conn, fasta, paths, alphas, os.path.join(outdir, tag),
                 n_groups, args.processors,
                 dict(cascade_kwargs, n_workers=1),
-                round_index=rounds[tag])
+                round_index=rounds[tag], lengths=lengths)
         return hierarchical_search.run_cascade(
             conn, fasta, paths, alphas, outdir,
             n_workers=args.processors, **cascade_kwargs)
@@ -487,7 +491,8 @@ def main():
                                         set(remaining), exclude=False)
             log.info("  %d sequences unclassified by the primary arm",
                      n_written)
-            sub_per_db = _search(sub_fa, sub_names, "subordinate")
+            sub_per_db = _search(sub_fa, sub_names, "subordinate",
+                                 subset=remaining)
             index_hits_tables(conn)
             # Reconciled among themselves only -- the collections are disjoint
             # slices of one library, so two of them hitting the same sequence
