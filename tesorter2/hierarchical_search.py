@@ -234,7 +234,8 @@ class HmmerEngine(Engine):
         optimized = _CACHE.optimized(db_path, AMINO_ALPHABET)
         block = build_sequence_block(fasta, AMINO_ALPHABET)
         log.info("    pyhmmer: %d models over %d frames", len(hmms), len(block))
-        return legacy_search(hmms, block, optimized=optimized)
+        return legacy_search(hmms, block, optimized=optimized,
+                             n_workers=n_workers)
 
 
 class NhmmerEngine(Engine):

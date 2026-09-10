@@ -230,11 +230,17 @@ def _partition_hmms_by_size(hmms):
     return normal, outliers
 
 
-def legacy_search(hmms, seq_block, optimized=None):
+def legacy_search(hmms, seq_block, optimized=None, n_workers=0):
     """
     Legacy mode: single-pass search with bias filter OFF on all sequences
     against all models. Equivalent to TEsorter's --nobias behavior, just
     faster (hmmsearch instead of hmmscan, pyhmmer instead of subprocess).
+
+    n_workers becomes pyhmmer's ``cpus``. Left at pyhmmer's default of 0 it
+    auto-selects every core, which is right for a search that owns the machine
+    and wrong the moment there are several of them: under --partition, 64
+    workers each asking for all 64 cores oversubscribed badly enough to show up
+    as cpu/wall of 3.3 on stages that had asked for one thread each.
 
     Models are partitioned by M^2 cost: normal models use parallel='queries'
     (faster when models are similarly sized), outliers use parallel='targets'
@@ -261,6 +267,7 @@ def legacy_search(hmms, seq_block, optimized=None):
             bias_filter=False,
             Z=Z, domZ=Z, E=1e10, domE=1e10,
             parallel="targets",
+            cpus=n_workers,
         ))
 
     normal, outliers = _partition_hmms_by_size(hmms)
@@ -274,6 +281,7 @@ def legacy_search(hmms, seq_block, optimized=None):
             bias_filter=False,
             Z=Z, domZ=Z, E=1e10, domE=1e10,
             parallel="queries",
+            cpus=n_workers,
         )
         all_hits.extend(_collect_hits(results_iter))
 
@@ -291,6 +299,7 @@ def legacy_search(hmms, seq_block, optimized=None):
             bias_filter=False,
             Z=Z, domZ=Z, E=1e10, domE=1e10,
             parallel="targets",
+            cpus=n_workers,
         )
         all_hits.extend(_collect_hits(results_iter))
 
