@@ -177,8 +177,8 @@ def _worker(job):
     return idx, per_db, db_path
 
 
-def merge_databases(conn, part_paths):
-    """Copy every partition's rows into the parent database.
+def merge_one(conn, path):
+    """Copy one partition's rows into the parent database.
 
     Generic over the schema: tables come from each partition's own
     sqlite_master, so one that only some partitions created (classifications is
@@ -195,54 +195,51 @@ def merge_databases(conn, part_paths):
     The row counts are checked rather than trusted: a table that loses rows in
     the copy raises instead of leaving a quietly short database.
     """
+    if not os.path.exists(path):
+        return 0
     n_rows = 0
-    for path in part_paths:
-        if not os.path.exists(path):
-            continue
-        conn.execute("ATTACH DATABASE ? AS part", (path,))
-        try:
-            tables = [r[0] for r in conn.execute(
-                "SELECT name FROM part.sqlite_master WHERE type='table' "
-                "AND name NOT LIKE 'sqlite_%'")]
-            for t in tables:
-                ddl = conn.execute(
-                    "SELECT sql FROM part.sqlite_master WHERE type='table' "
-                    "AND name=?", (t,)).fetchone()
-                if ddl and ddl[0]:
-                    conn.execute(ddl[0].replace(
-                        "CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
-                info = list(conn.execute("PRAGMA part.table_info(%s)" % t))
-                # (cid, name, type, notnull, default, pk)
-                keyed = any(c[5] for c in info)
-                want = conn.execute(
-                    "SELECT COUNT(*) FROM part.%s" % t).fetchone()[0]
-                before = conn.execute(
-                    "SELECT COUNT(*) FROM main.%s" % t).fetchone()[0]
-                # `SELECT *` returns the declared columns only, never the
-                # rowid, so the parent assigns its own and every row appends --
-                # whatever order the groups happen to finish in. OR IGNORE only
-                # where the key is real data the parent may already hold, as
-                # with sequences.name.
-                verb = "INSERT OR IGNORE" if keyed else "INSERT"
-                conn.execute("%s INTO main.%s SELECT * FROM part.%s"
-                             % (verb, t, t))
-                after = conn.execute(
-                    "SELECT COUNT(*) FROM main.%s" % t).fetchone()[0]
-                if not keyed and after - before != want:
-                    raise RuntimeError("merging %s from %s copied %d of %d rows"
-                                       % (t, path, after - before, want))
-                n_rows += after - before
-            conn.commit()
-        except Exception:
-            # Roll back first: a failed insert leaves the transaction open and
-            # DETACH then fails with "database is locked", replacing the real
-            # error with a misleading one.
-            conn.rollback()
-            raise
-        finally:
-            conn.execute("DETACH DATABASE part")
-    log.info("  Merged %d rows from %d partition databases",
-             n_rows, len(part_paths))
+    conn.execute("ATTACH DATABASE ? AS part", (path,))
+    try:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM part.sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'")]
+        for t in tables:
+            ddl = conn.execute(
+                "SELECT sql FROM part.sqlite_master WHERE type='table' "
+                "AND name=?", (t,)).fetchone()
+            if ddl and ddl[0]:
+                conn.execute(ddl[0].replace(
+                    "CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
+            info = list(conn.execute("PRAGMA part.table_info(%s)" % t))
+            # (cid, name, type, notnull, default, pk)
+            keyed = any(c[5] for c in info)
+            want = conn.execute(
+                "SELECT COUNT(*) FROM part.%s" % t).fetchone()[0]
+            before = conn.execute(
+                "SELECT COUNT(*) FROM main.%s" % t).fetchone()[0]
+            # `SELECT *` returns the declared columns only, never the
+            # rowid, so the parent assigns its own and every row appends --
+            # whatever order the groups happen to finish in. OR IGNORE only
+            # where the key is real data the parent may already hold, as
+            # with sequences.name.
+            verb = "INSERT OR IGNORE" if keyed else "INSERT"
+            conn.execute("%s INTO main.%s SELECT * FROM part.%s"
+                         % (verb, t, t))
+            after = conn.execute(
+                "SELECT COUNT(*) FROM main.%s" % t).fetchone()[0]
+            if not keyed and after - before != want:
+                raise RuntimeError("merging %s from %s copied %d of %d rows"
+                                   % (t, path, after - before, want))
+            n_rows += after - before
+        conn.commit()
+    except Exception:
+        # Roll back first: a failed insert leaves the transaction open and
+        # DETACH then fails with "database is locked", replacing the real
+        # error with a misleading one.
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("DETACH DATABASE part")
     return n_rows
 
 
@@ -273,15 +270,24 @@ def run_partitioned(conn, input_fasta, db_paths, db_alphabets, outdir,
     log.info("Searching %d groups across %d workers, one thread each",
              n_groups, min(n_groups, n_workers))
     per_db = {}
-    part_dbs = []
+    merged = 0
+    # Each group is merged as it lands, not after the pool drains. The parent
+    # is otherwise idle while the workers search, and doing all 64 copies at
+    # the end concentrates every row of I/O into one burst against a filesystem
+    # that already has 64 workers on it -- so all but the last merge happens in
+    # the shadow of the groups still running.
+    #
+    # Yields stay unordered. Ordering them would let one slow group hold back
+    # every merge behind it, and there is no reason to: `id` is the input
+    # ordinal rather than the rowid, so a row's value no longer decides where
+    # it lands and appends are appends whatever order groups finish in.
     with multiprocessing.Pool(min(n_groups, n_workers)) as pool:
         for idx, part, db_path in pool.imap_unordered(_worker, jobs):
-            part_dbs.append(db_path)
             for name, results in part.items():
                 per_db.setdefault(name, []).extend(results)
-            log.info("  group %d done: %s", idx,
-                     ", ".join("%s=%d" % (k, len(v)) for k, v in part.items())
-                     or "nothing classified")
-
-    merge_databases(conn, part_dbs)
+            merged += merge_one(conn, db_path)
+            log.info("  group %d done (%s), merged",
+                     idx, ", ".join("%s=%d" % (k, len(v))
+                                    for k, v in part.items()) or "nothing")
+    log.info("  Merged %d rows from %d partition databases", merged, n_groups)
     return per_db
