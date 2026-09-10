@@ -43,13 +43,13 @@ DB_ALIASES = {
     "gydb":     "GyDB2.hmm",
     "line":     "Kapitonov_et_al.GENE.LINE.hmm",
     "tir":      "Yuan_and_Wessler.PNAS.TIR.hmm",
-    "sine":     "AnnoSINE_core.hmm",
+    "sine":     "AnnoSINE_core.hmm.gz",
     # AnnoSINE ships plant models; AnnoSINE v2 adds a separate animal set, and
     # RepBase's SINEs are ~68% animal. Kept as its own database rather than
     # merged into AnnoSINE_core.hmm so the plant and animal model sets stay
     # separable, and because a user searching plant genomes should be able to
     # drop it. On by default, like every alias except sine-so.
-    "sine-animals": "AnnoSINE_animals.hmm",
+    "sine-animals": "AnnoSINE_animals.hmm.gz",
     "sine-so":  "SINE_SO.hmm",
     # Pfam-derived TE domains, for families the curated databases do not model:
     # L1 ORF1p/ORF2p flanking domains, DNA-transposon DNA-binding and
