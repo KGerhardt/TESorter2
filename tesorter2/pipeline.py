@@ -152,6 +152,13 @@ def _add_shared(p):
                         "processor. Most of a run's wall clock sits in nhmmer "
                         "and nail, which parallelise over queries rather than "
                         "targets; this is the other axis.")
+    p.add_argument("--partition-queue", action="store_true", default=False,
+                   help="With --partition, schedule (chunk x database) tasks "
+                        "from one queue per cascade level instead of giving "
+                        "each worker a whole chunk. A slow chunk is then "
+                        "shared across workers rather than owned by one, so "
+                        "the tail is a single search rather than a chunk's "
+                        "entire cascade.")
     p.add_argument("--include-sine-so", action="store_true", default=False,
                    help="Include the SINE_SO model (M=4176) in AnnoSINE "
                         "searches. Excluded by default: it costs 71%% of "
@@ -451,6 +458,19 @@ def main():
         """One search round, partitioned or not, over the named databases."""
         paths = {n: db_paths[n] for n in names}
         alphas = {n: db_alphabets[n] for n in names}
+        if n_groups and n_groups > 1 and args.partition_queue:
+            from . import queue_search
+            lengths = (nucl_lengths if subset is None
+                       else {k: nucl_lengths[k] for k in subset})
+            return queue_search.run_queued(
+                conn, fasta, paths, alphas, os.path.join(outdir, tag),
+                n_groups, args.processors,
+                protein_stages=[x.strip() for x in args.stages.split(",")],
+                seq_type=args.seq_type, mask_stops=args.mask_stops,
+                compat_rounding=args.compat_tesorter_rounding,
+                compat_voting=args.compat_tesorter_voting,
+                min_clade_delta=args.min_clade_delta,
+                seq_index=seq_index, lengths=lengths)
         if n_groups and n_groups > 1:
             from . import partition
             # Sequence lengths are already in hand from reading the input, so
