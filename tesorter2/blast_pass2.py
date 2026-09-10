@@ -74,14 +74,16 @@ def split_classified_unclassified(input_fasta, classified_ids, outdir,
     chunk_handles = [open(p, "w") for p in chunk_paths]
     chunk_lengths = [0] * n_chunks
 
-    fa = pyfastx.Fasta(input_fasta, build_index=True)
+    # build_index=False: this walks the whole input once, in order, and never
+    # looks a sequence up by name. An index here is a SQLite sidecar built over
+    # the entire 388 Mb input for nothing -- the largest of the wasted index
+    # builds, since every other one was over a stage subset.
+    fa = pyfastx.Fasta(input_fasta, build_index=False)
     n_classified = 0
     n_unclassified = 0
     db_seq_to_dbs = {}
 
-    for rec in fa:
-        name = rec.name
-        seq = str(rec.seq)
+    for name, seq in fa:
 
         if name in classified_ids:
             db_handle.write(f">{name}\n{seq}\n")
