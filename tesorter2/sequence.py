@@ -177,22 +177,28 @@ def translate_fasta(input_fasta, output_fasta, mask_stops=False):
     Returns:
         dict of {original_seq_name: seq_length} from the input
     """
-    fa = open_input(input_fasta)
+    # build_index=False: the input is read once, start to finish, and never
+    # looked up by name. open_input() would write a .fxi sidecar beside it for
+    # nothing -- once per partition worker under --partition, on a filesystem
+    # already carrying the search.
+    fa = pyfastx.Fasta(input_fasta, build_index=False)
     nucl_lengths = {}
     stop_char = "X" if mask_stops else "*"
 
     with open(output_fasta, "w") as fout:
-        for rec in fa:
-            name = rec.name
-            sequence = clean_seq(str(rec.seq).upper())
+        for name, raw in fa:
+            sequence = clean_seq(raw.upper())
             nucl_lengths[name] = len(sequence)
 
             for frame_name, aa_seq in six_frame_translate_seq(
                     name, sequence, stop_char=stop_char):
                 fout.write(f">{frame_name}\n{aa_seq}\n")
 
-    # Build pyfastx index on the output
-    pyfastx.Fasta(output_fasta, build_index=True)
+    # No index on the output either. Every consumer that needs random access
+    # to the translation opens it with build_index=True itself, which builds
+    # one on demand and reuses an existing one -- so building it eagerly here
+    # only guarantees the cost, and under --partition guarantees it 64 times
+    # over on files six times the size of each group.
 
     return nucl_lengths
 

@@ -88,16 +88,19 @@ def parse_domtbl_text(text):
 def build_sequence_block(aa_fasta, alphabet=None):
     """
     Build a DigitalSequenceBlock from a FASTA file.
+
+    build_index=False: this reads every record in order and never looks one up
+    by name, so an index buys nothing and costs a SQLite sidecar written per
+    call. That is once per stage per database -- about 21 times in a plain run,
+    but ~1,300 times when 64 partition workers each build their own, which is
+    real I/O against a filesystem already carrying the search.
     """
     if alphabet is None:
         alphabet = AMINO_ALPHABET
 
     seqs = []
-    for rec in pyfastx.Fasta(aa_fasta, build_index=True):
-        ts = easel.TextSequence(
-            name=rec.name.encode("ascii"),
-            sequence=str(rec.seq),
-        )
+    for name, seq in pyfastx.Fasta(aa_fasta, build_index=False):
+        ts = easel.TextSequence(name=name.encode("ascii"), sequence=seq)
         seqs.append(ts.digitize(alphabet))
 
     return easel.DigitalSequenceBlock(alphabet, seqs)
