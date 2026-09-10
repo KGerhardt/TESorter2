@@ -152,6 +152,13 @@ def _add_shared(p):
                         "processor. Most of a run's wall clock sits in nhmmer "
                         "and nail, which parallelise over queries rather than "
                         "targets; this is the other axis.")
+    p.add_argument("--memory-db", action="store_true", default=False,
+                   help="Build the results database in RAM and copy it to disk "
+                        "in one sequential pass at the end. Index creation is "
+                        "random-write, which is the worst case for the "
+                        "parallel filesystems cluster runs write to. Costs "
+                        "memory proportional to the hit count and loses the "
+                        "results if the run dies before finishing.")
     p.add_argument("--partition-queue", action="store_true", default=False,
                    help="With --partition, schedule (chunk x database) tasks "
                         "from one queue per cascade level instead of giving "
@@ -373,8 +380,12 @@ def main():
             win_size=args.win_size, win_ovl=args.win_ovl)
         return
 
-    # Create results database
-    conn = create_db(db_path_out)
+    # Create results database. --memory-db keeps it in RAM until the end; see
+    # backup_to for why that is not just a speed trick.
+    conn = create_db(":memory:" if args.memory_db else db_path_out)
+    if args.memory_db:
+        log.info("Results database in memory; written to %s at the end",
+                 db_path_out)
 
     # Read input and store sequence metadata
     t_start = time.time()
@@ -630,6 +641,12 @@ def main():
     log.info("Finalizing database")
     t_fin0 = time.time()
     finalize_db(conn)
+    if args.memory_db:
+        t_db = time.time()
+        from .results import backup_to
+        backup_to(conn, db_path_out)
+        log.info("  Results database written to disk in %.1fs",
+                 time.time() - t_db)
     log.info(f"  Finalized in {time.time() - t_fin0:.1f}s")
 
     t_end = time.time()

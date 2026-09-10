@@ -152,6 +152,28 @@ def create_db(db_path):
     return conn
 
 
+def backup_to(conn, db_path):
+    """Copy an in-memory results database to disk.
+
+    sqlite's Online Backup API, not `VACUUM INTO`: backup copies pages as they
+    are, carrying the indexes across already built, and writes them
+    sequentially. VACUUM INTO repacks and rebuilds, which is the work being
+    avoided.
+
+    Building the database in memory matters because index creation is
+    random-write, which is the worst case for a parallel filesystem like the
+    scratch a cluster run writes to. Under `--memory-db` the whole results
+    database lives in RAM and reaches disk in one sequential pass at the end.
+    """
+    dest = sqlite3.connect(db_path)
+    try:
+        conn.commit()
+        conn.backup(dest)
+        dest.commit()
+    finally:
+        dest.close()
+
+
 def index_hits_tables(conn):
     """Build indexes on legacy_hits.
 
