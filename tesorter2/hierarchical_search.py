@@ -101,7 +101,8 @@ from .hmm import (load_hmms, build_optimized_profiles, peek_alphabet,
 from .search import build_sequence_block, legacy_search, legacy_search_nucl
 from .sequence import translate_fasta
 from .subset import subset_fasta, base_name
-from .classifier import classify_sequences, store_classifications, DB_CONFIGS
+from .classifier import (classify_sequences, store_classifications,
+                         reconcile_classifications, DB_CONFIGS)
 from .results import store_legacy
 from .search import _EVALUE_FIELDS
 from . import bath_search, nail_search
@@ -507,155 +508,38 @@ def _materialize(kind, remaining, all_names, sources, workdir, tag):
     return out
 
 
-def run_cascade_for_db(conn, db_name, db_path, db_kind, stages, sources,
-                       all_names, outdir, n_workers=4, reject_floors=None,
-                       compat_rounding=False, compat_voting=False,
-                       search_space_mb=None, timing=None, min_clade_delta=0.0,
-                       evalue_scale=1.0, seq_index=None):
-    """Run one database's cascade. Returns its classification dicts.
-
-    Every stage's hits land in legacy_hits stamped with engine and stage, and
-    every sequence's exit is recorded in cascade_exits.
-    """
-    config = DB_CONFIGS.get(db_name)
-    if config is None:
-        log.warning("  No classifier config for %s, skipping", db_name)
-        return []
-
-    reject_floors = reject_floors or {}
-    remaining = set(all_names)
-    results = []
-
-    for stage_idx, engine in enumerate(stages):
-        if not remaining:
-            log.info("  [%s] stage %d (%s): nothing left, stopping",
-                     db_name, stage_idx, engine.name)
-            break
-
-        workdir = os.path.join(outdir, "cascade", db_name, "s%d" % stage_idx)
-        os.makedirs(workdir, exist_ok=True)
-
-        fasta = _materialize(engine.input_kind, remaining, all_names,
-                             sources, workdir, db_name)
-        if fasta is None:
-            break
-
-        n_seqs_in = len(remaining)
-        n_recs_in = _count_records(fasta)
-        log.info("  [%s] stage %d (%s): %d sequences in"
-                 "%s",
-                 db_name, stage_idx, engine.name, n_seqs_in,
-                 ("" if n_recs_in in (None, n_seqs_in)
-                  else " (%d %s records searched)"
-                       % (n_recs_in,
-                          "frame" if engine.input_kind.startswith("aa")
-                          else "nucl")))
-        t0 = time.time()
-        u0, s0 = _cpu_times()
-        hits = engine.search(db_path, fasta, db_name, workdir, n_workers,
-                             search_space_mb=search_space_mb)
-
-        # nail exposes no -Z, so its E-values are computed against whatever
-        # target set it was handed. Every other engine honours the pinned
-        # search space; nail is corrected here instead, which is exact because
-        # an E-value scales linearly with search-space size. Under a
-        # partitioned run evalue_scale is full_residues/partition_residues;
-        # unpartitioned it is 1.0 and this is a no-op.
-        if evalue_scale != 1.0 and engine.name == "nail" and hits:
-            for h in hits:
-                for field in _EVALUE_FIELDS:
-                    if field in h:
-                        h[field] *= evalue_scale
-        wall = time.time() - t0
-        u1, s1 = _cpu_times()
-        user_s, sys_s = u1 - u0, s1 - s0
-        log.info("    %d hits in %.1fs wall  (user %.1fs, sys %.1fs, "
-                 "cpu %.1fs, %.0f%% of %d cores)",
-                 len(hits), wall, user_s, sys_s, user_s + sys_s,
-                 100.0 * (user_s + sys_s) / wall / max(n_workers, 1)
-                 if wall > 0 else 0.0, n_workers)
-
-        # A stage may see hits for sequences an earlier stage already resolved
-        # when it re-reads a shared source file; keep only the ones still in
-        # play so the stage's verdict cannot overwrite a settled one.
-        hits = [h for h in hits if base_name(h["target_name"]) in remaining]
-
-        if hits:
-            store_legacy(conn, hits, db_name, engine=engine.name,
-                         seq_index=seq_index,
-                         stage=stage_idx)
-
-        arrays = hits_to_arrays(hits)
-        stage_results = []
-        if arrays is not None:
-            stage_results = classify_sequences(
-                arrays, config,
-                compat_rounding=compat_rounding,
-                compat_voting=compat_voting,
-                min_clade_delta=min_clade_delta)
-            for r in stage_results:
-                r["engine"] = engine.name
-                r["stage"] = stage_idx
-
-        labeled = {r["id"] for r in stage_results}
-        remaining -= labeled
-        _record_exits(conn, db_name, stage_idx, engine.name, labeled,
-                      "classified")
-
-        rejected = _rejected(arrays, remaining,
-                             reject_floors.get(engine.name))
-        if rejected:
-            remaining -= rejected
-            _record_exits(conn, db_name, stage_idx, engine.name, rejected,
-                          "rejected")
-
-        results.extend(stage_results)
-        log.info("    %d classified, %d rejected, %d remaining",
-                 len(labeled), len(rejected), len(remaining))
-
-        if timing is not None:
-            timing.append({
-                "database": db_name, "stage": stage_idx,
-                "engine": engine.name, "input_kind": engine.input_kind,
-                "seqs_in": n_seqs_in,
-                "records_searched": n_recs_in if n_recs_in is not None else "",
-                "wall_s": round(wall, 2),
-                "user_s": round(user_s, 2), "sys_s": round(sys_s, 2),
-                "cpu_s": round(user_s + sys_s, 2),
-                "hits": len(hits), "classified": len(labeled),
-                "rejected": len(rejected), "remaining": len(remaining),
-            })
-
-    if remaining:
-        _record_exits(conn, db_name, len(stages) - 1,
-                      stages[-1].name if stages else "", remaining,
-                      "unresolved")
-
-    if results:
-        store_classifications(conn, results, database=db_name,
-                              mode="hierarchical")
-    return results
-
-
 def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
                 protein_stages=DEFAULT_STAGES, n_workers=4,
                 reject_floors=None, compat_rounding=False,
                 compat_voting=False, aa_fasta=None, mask_stops=False,
                 min_clade_delta=0.0, seq_type="nucl",
-                search_space_mb=None, evalue_scale=1.0, seq_index=None):
-    """Run the cascade for every database. Returns {db_name: [results]}.
+                search_space_mb=None, evalue_scale=1.0, seq_index=None,
+                dna_level=0):
+    """Run the cascade level by level. Returns {db_name: [results]}.
 
-    Databases are searched independently and reconciled by the caller -- this
-    function is the whole search+classify half of a `sequences` run, and the
-    cross-database logic after it is unchanged.
+    **A level is every database, then deconfliction, then the next level.**
+    The loop is levels-outer, databases-inner, and `remaining` is global: at
+    each level every database searches what is still unresolved, the results
+    are reconciled across databases, and every sequence the vote settles is
+    finished -- no later engine of any database ever sees it again.
 
-    seq_type="prot" means the input is already amino acid: no translation, no
-    nucleotide-reading engine, and no DNA profile database.
+    That ordering is the point of the cascade. nail exists to retire trivial
+    hits cheaply: sequences that match a model well enough that no more
+    expensive engine could change the answer. Letting each database run its own
+    stages independently, as this did before, means a sequence nail resolved
+    against rexdb is still searched by hmmer and bath for six other databases,
+    which cannot alter its call and costs the majority of the run.
+
+    Deconfliction is the same hierarchical weighted vote used to combine
+    databases at the end, applied per level. A sequence exits on a *reconciled*
+    call, not on any single database's -- one database labelling it is not the
+    answer until the others at that level have been heard.
+
+    Databases with different stage counts drop out as they are exhausted: a DNA
+    database has one stage, so it contributes to the level named by
+    `dna_level` and is done, while the amino-acid databases continue. Which
+    level that should be is an empirical question -- see the note on dna_level.
     """
-    # Pinned once, from the whole input, and reused by every stage of every
-    # database. Without this a stage's E-values improve as upstream stages
-    # remove sequences, so a cascade's verdicts would depend on how much came
-    # before it rather than on the sequence itself.
     lengths = list(_iter_names(input_fasta))
     all_names = [name for name, _ in lengths]
     own_mb = sum(n for _, n in lengths) / 1e6
@@ -664,18 +548,13 @@ def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
         log.info("Search space pinned at %.3f Mb (%d sequences)",
                  search_space_mb, len(all_names))
     else:
-        # Partitioned run: this worker holds a slice, but E-values must be
-        # those of the whole input or a sequence's verdict would depend on
-        # which partition it landed in.
         log.info("Search space pinned at %.3f Mb (whole input); this worker "
                  "holds %.3f Mb (%d sequences)",
                  search_space_mb, own_mb, len(all_names))
 
     protein_stages = stages_for_input(protein_stages, seq_type)
+    reject_floors = reject_floors or {}
 
-    # Every source is built once for the whole run and subset per stage, never
-    # regenerated. Protein input already is what the AA engines read, so it is
-    # its own "aa" source and there is no nucleotide source at all.
     sources = {"nucl": None if seq_type == "prot" else input_fasta,
                "aa": input_fasta if seq_type == "prot" else aa_fasta,
                "aa_nostop": None}
@@ -688,11 +567,6 @@ def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
                  " (stops masked as X)" if mask_stops else "")
         translate_fasta(input_fasta, sources["aa"], mask_stops=mask_stops)
 
-    # nail's stop-free targets, prepared once for the run rather than once per
-    # database. The rewrite is a full copy of the translation -- minutes on a
-    # large library -- and every nail stage of every database would otherwise
-    # redo it. Under --mask-stops the shared translation already says X, so
-    # this is the same file and nothing is written.
     if needs_aa and "aa_nostop" in kinds:
         if mask_stops:
             sources["aa_nostop"] = sources["aa"]
@@ -701,33 +575,167 @@ def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
                 sources["aa"],
                 os.path.join(outdir, "cascade_input.nostop.aa"))
 
-    per_db = {}
-    timing = []
+    # Per-database stage lists. A DNA database has exactly one stage and is
+    # placed at `dna_level`; everything else runs the protein stage list.
+    plans = {}
     for db_name, db_path in db_paths.items():
         is_dna = db_alphabets[db_name] == DNA_ALPHABET
         if is_dna and seq_type == "prot":
             log.warning("  Skipping %s: nhmmer is the only engine that reads "
-                        "a DNA profile and it needs nucleotide input",
-                        db_name)
+                        "a DNA profile and it needs nucleotide input", db_name)
+            continue
+        if DB_CONFIGS.get(db_name) is None:
+            log.warning("  No classifier config for %s, skipping", db_name)
             continue
         names = DNA_STAGES if is_dna else protein_stages
         stages = build_stages(names)
-
-        # External tools are hard dependencies only if a stage uses them.
         if any(s.name == "bath" for s in stages):
             bath_search.require_binaries()
         if any(s.name == "nail" for s in stages):
             nail_search.require_binaries()
+        # {level: engine}
+        if is_dna:
+            plans[db_name] = ({dna_level: stages[0]}, db_path, stages)
+        else:
+            plans[db_name] = ({i: s for i, s in enumerate(stages)}, db_path,
+                              stages)
 
-        log.info("--- Cascade: %s [%s] ---", db_name,
-                 " -> ".join(s.name for s in stages))
-        per_db[db_name] = run_cascade_for_db(
-            conn, db_name, db_path, "dna" if is_dna else "aa", stages,
-            sources, all_names, outdir, n_workers=n_workers,
-            reject_floors=reject_floors, compat_rounding=compat_rounding,
-            compat_voting=compat_voting, search_space_mb=search_space_mb,
-            timing=timing, min_clade_delta=min_clade_delta,
-            evalue_scale=evalue_scale, seq_index=seq_index)
+    if not plans:
+        return {}
+    n_levels = max(max(p[0]) for p in plans.values()) + 1
+    log.info("Cascade: %d level(s) over %d database(s); a reconciled call at "
+             "any level ends that sequence for every database",
+             n_levels, len(plans))
+
+    remaining = set(all_names)
+    active = {db: set(all_names) for db in plans}     # per-database viability
+    per_db = {db: [] for db in plans}
+    timing = []
+
+    for level in range(n_levels):
+        if not remaining:
+            log.info("--- Level %d: nothing unresolved, stopping ---", level)
+            break
+        runners = [(db, p[0][level], p[1]) for db, p in plans.items()
+                   if level in p[0]]
+        if not runners:
+            continue
+        log.info("--- Level %d: %s ---", level,
+                 ", ".join("%s[%s]" % (db, e.name) for db, e, _ in runners))
+
+        # One materialisation per input kind, not per database: `remaining` is
+        # global, so every database at this level searches the same targets.
+        level_dir = os.path.join(outdir, "cascade", "L%d" % level)
+        os.makedirs(level_dir, exist_ok=True)
+        shared = {}
+        level_results = {}
+
+        for db_name, engine, db_path in runners:
+            targets = remaining & active[db_name]
+            if not targets:
+                continue
+            if engine.input_kind not in shared:
+                shared[engine.input_kind] = _materialize(
+                    engine.input_kind, targets, all_names, sources,
+                    level_dir, "L%d" % level)
+            fasta = shared[engine.input_kind]
+            if fasta is None:
+                continue
+
+            n_seqs_in = len(targets)
+            n_recs_in = _count_records(fasta)
+            log.info("  [%s] level %d (%s): %d sequences in%s",
+                     db_name, level, engine.name, n_seqs_in,
+                     ("" if n_recs_in in (None, n_seqs_in)
+                      else " (%d %s records searched)"
+                           % (n_recs_in,
+                              "frame" if engine.input_kind.startswith("aa")
+                              else "nucl")))
+            t0 = time.time()
+            u0, s0 = _cpu_times()
+            hits = engine.search(db_path, fasta, db_name, level_dir, n_workers,
+                                 search_space_mb=search_space_mb)
+
+            # nail exposes no -Z, so its E-values are computed against whatever
+            # target set it was handed. Every other engine honours the pinned
+            # search space; nail is corrected here, exactly, because an E-value
+            # scales linearly with search-space size.
+            if evalue_scale != 1.0 and engine.name == "nail" and hits:
+                for h in hits:
+                    for field in _EVALUE_FIELDS:
+                        if field in h:
+                            h[field] *= evalue_scale
+            wall = time.time() - t0
+            u1, s1 = _cpu_times()
+            user_s, sys_s = u1 - u0, s1 - s0
+            log.info("    %d hits in %.1fs wall  (cpu %.1fs)",
+                     len(hits), wall, user_s + sys_s)
+
+            hits = [h for h in hits if base_name(h["target_name"]) in targets]
+            if hits:
+                store_legacy(conn, hits, db_name, engine=engine.name,
+                             seq_index=seq_index, stage=level)
+
+            arrays = hits_to_arrays(hits)
+            stage_results = []
+            if arrays is not None:
+                stage_results = classify_sequences(
+                    arrays, DB_CONFIGS[db_name],
+                    compat_rounding=compat_rounding,
+                    compat_voting=compat_voting,
+                    min_clade_delta=min_clade_delta)
+                for r in stage_results:
+                    r["engine"] = engine.name
+                    r["stage"] = level
+            if stage_results:
+                level_results[db_name] = stage_results
+                per_db[db_name].extend(stage_results)
+
+            rejected = _rejected(arrays, targets,
+                                 reject_floors.get(engine.name))
+            if rejected:
+                active[db_name] -= rejected
+                _record_exits(conn, db_name, level, engine.name, rejected,
+                              "rejected")
+
+            timing.append({
+                "database": db_name, "stage": level, "engine": engine.name,
+                "input_kind": engine.input_kind, "seqs_in": n_seqs_in,
+                "records_searched": n_recs_in if n_recs_in is not None else "",
+                "wall_s": round(wall, 2), "user_s": round(user_s, 2),
+                "sys_s": round(sys_s, 2), "cpu_s": round(user_s + sys_s, 2),
+                "hits": len(hits), "classified": len(stage_results),
+                "rejected": len(rejected), "remaining": "",
+            })
+
+        # Deconflict this level across every database that spoke, and retire
+        # what the vote settled. This is what makes the level a barrier.
+        settled = set()
+        if level_results:
+            settled = {r["id"] for r in
+                       reconcile_classifications(level_results)}
+        remaining -= settled
+        for db_name in level_results:
+            _record_exits(conn, db_name, level,
+                          dict((d, e.name) for d, e, _ in runners)[db_name],
+                          settled & {r["id"] for r in level_results[db_name]},
+                          "classified")
+        log.info("  Level %d: %d databases spoke, %d sequences resolved, "
+                 "%d remaining", level, len(level_results), len(settled),
+                 len(remaining))
+        for row in timing:
+            if row["stage"] == level and row["remaining"] == "":
+                row["remaining"] = len(remaining)
+
+    if remaining:
+        for db_name in plans:
+            _record_exits(conn, db_name, n_levels - 1, "", remaining,
+                          "unresolved")
+
+    for db_name, results in per_db.items():
+        if results:
+            store_classifications(conn, results, database=db_name,
+                                  mode="hierarchical")
 
     if timing:
         _write_timing(timing, os.path.join(outdir, "cascade_timing.tsv"))
