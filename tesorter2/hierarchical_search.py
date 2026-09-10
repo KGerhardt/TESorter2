@@ -103,6 +103,7 @@ from .sequence import translate_fasta
 from .subset import subset_fasta, base_name
 from .classifier import classify_sequences, store_classifications, DB_CONFIGS
 from .results import store_legacy
+from .search import _EVALUE_FIELDS
 from . import bath_search, nail_search
 
 
@@ -508,7 +509,8 @@ def _materialize(kind, remaining, all_names, sources, workdir, tag):
 def run_cascade_for_db(conn, db_name, db_path, db_kind, stages, sources,
                        all_names, outdir, n_workers=4, reject_floors=None,
                        compat_rounding=False, compat_voting=False,
-                       search_space_mb=None, timing=None, min_clade_delta=0.0):
+                       search_space_mb=None, timing=None, min_clade_delta=0.0,
+                       evalue_scale=1.0, id_counter=None):
     """Run one database's cascade. Returns its classification dicts.
 
     Every stage's hits land in legacy_hits stamped with engine and stage, and
@@ -551,6 +553,18 @@ def run_cascade_for_db(conn, db_name, db_path, db_kind, stages, sources,
         u0, s0 = _cpu_times()
         hits = engine.search(db_path, fasta, db_name, workdir, n_workers,
                              search_space_mb=search_space_mb)
+
+        # nail exposes no -Z, so its E-values are computed against whatever
+        # target set it was handed. Every other engine honours the pinned
+        # search space; nail is corrected here instead, which is exact because
+        # an E-value scales linearly with search-space size. Under a
+        # partitioned run evalue_scale is full_residues/partition_residues;
+        # unpartitioned it is 1.0 and this is a no-op.
+        if evalue_scale != 1.0 and engine.name == "nail" and hits:
+            for h in hits:
+                for field in _EVALUE_FIELDS:
+                    if field in h:
+                        h[field] *= evalue_scale
         wall = time.time() - t0
         u1, s1 = _cpu_times()
         user_s, sys_s = u1 - u0, s1 - s0
@@ -567,6 +581,7 @@ def run_cascade_for_db(conn, db_name, db_path, db_kind, stages, sources,
 
         if hits:
             store_legacy(conn, hits, db_name, engine=engine.name,
+                         id_counter=id_counter,
                          stage=stage_idx)
 
         arrays = hits_to_arrays(hits)
@@ -625,7 +640,8 @@ def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
                 protein_stages=DEFAULT_STAGES, n_workers=4,
                 reject_floors=None, compat_rounding=False,
                 compat_voting=False, aa_fasta=None, mask_stops=False,
-                min_clade_delta=0.0, seq_type="nucl"):
+                min_clade_delta=0.0, seq_type="nucl",
+                search_space_mb=None, evalue_scale=1.0, id_base=None):
     """Run the cascade for every database. Returns {db_name: [results]}.
 
     Databases are searched independently and reconciled by the caller -- this
@@ -641,9 +657,18 @@ def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
     # before it rather than on the sequence itself.
     lengths = list(_iter_names(input_fasta))
     all_names = [name for name, _ in lengths]
-    search_space_mb = sum(n for _, n in lengths) / 1e6
-    log.info("Search space pinned at %.3f Mb (%d sequences)",
-             search_space_mb, len(all_names))
+    own_mb = sum(n for _, n in lengths) / 1e6
+    if search_space_mb is None:
+        search_space_mb = own_mb
+        log.info("Search space pinned at %.3f Mb (%d sequences)",
+                 search_space_mb, len(all_names))
+    else:
+        # Partitioned run: this worker holds a slice, but E-values must be
+        # those of the whole input or a sequence's verdict would depend on
+        # which partition it landed in.
+        log.info("Search space pinned at %.3f Mb (whole input); this worker "
+                 "holds %.3f Mb (%d sequences)",
+                 search_space_mb, own_mb, len(all_names))
 
     protein_stages = stages_for_input(protein_stages, seq_type)
 
@@ -675,6 +700,9 @@ def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
                 sources["aa"],
                 os.path.join(outdir, "cascade_input.nostop.aa"))
 
+    # A partitioned worker is handed a disjoint id range so its hit rows are
+    # globally unique as written.
+    id_counter = None if id_base is None else [id_base]
     per_db = {}
     timing = []
     for db_name, db_path in db_paths.items():
@@ -700,7 +728,8 @@ def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
             sources, all_names, outdir, n_workers=n_workers,
             reject_floors=reject_floors, compat_rounding=compat_rounding,
             compat_voting=compat_voting, search_space_mb=search_space_mb,
-            timing=timing, min_clade_delta=min_clade_delta)
+            timing=timing, min_clade_delta=min_clade_delta,
+            evalue_scale=evalue_scale, id_counter=id_counter)
 
     if timing:
         _write_timing(timing, os.path.join(outdir, "cascade_timing.tsv"))

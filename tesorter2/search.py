@@ -176,10 +176,14 @@ def legacy_search_nucl(hmms, seq_block, megabases=None, n_workers=0):
     # Longest-first, for the same reason legacy_search's partitions are sorted:
     # nhmmer dispatches queries to threads in order, so the expensive models
     # should start first (see _partition_hmms_by_size).
+    # domZ is pinned alongside Z. Without it the conditional E-value is
+    # normalised against however many domains this particular target set
+    # produced, so c_evalue moves when the input is split even though every
+    # other E-value holds -- the protein path already pins both (Z=Z, domZ=Z).
     hits = _collect_hits(pyhmmer.nhmmer(
         sorted(hmms, key=lambda h: -h.M), seq_block,
         bias_filter=False,
-        Z=1, E=1e10,
+        Z=1, domZ=1, E=1e10,
         cpus=n_workers,
     ))
     for h in hits:

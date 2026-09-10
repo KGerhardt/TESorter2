@@ -141,6 +141,17 @@ def _add_shared(p):
                         "[default: the databases bundled with the package]")
     p.add_argument("-p", "--processors", type=int, default=4,
                    help="Processors to use [default: 4]")
+    p.add_argument("--partition", type=int, default=0, metavar="N",
+                   help="Split the input into N balanced groups and search "
+                        "each in its own single-threaded worker. The cascade "
+                        "decides per sequence, so a group is independent and "
+                        "the results concatenate; E-values are held on the "
+                        "whole input's scale so a verdict cannot depend on "
+                        "which group a sequence landed in. Use N=0 (default) "
+                        "for the existing behaviour, or -1 for one group per "
+                        "processor. Most of a run's wall clock sits in nhmmer "
+                        "and nail, which parallelise over queries rather than "
+                        "targets; this is the other axis.")
     p.add_argument("--include-sine-so", action="store_true", default=False,
                    help="Include the SINE_SO model (M=4176) in AnnoSINE "
                         "searches. Excluded by default: it costs 71%% of "
@@ -413,17 +424,43 @@ def main():
         log.info("Subordinate (searched only on what the primary arm leaves): "
                  "%s", ", ".join(sub_names))
 
-    per_db_results = hierarchical_search.run_cascade(
-        conn, args.sequence,
-        {n: db_paths[n] for n in primary_names},
-        {n: db_alphabets[n] for n in primary_names}, outdir,
+    # Partitioned mode is opt-in. Autodetection is deliberately not attempted:
+    # the useful group count depends on the input, and a flag keeps that the
+    # caller's decision until there is a rule worth trusting.
+    n_groups = args.partition
+    if n_groups == -1:
+        n_groups = args.processors
+    if n_groups and n_groups > len(nucl_lengths):
+        log.warning("--partition %d exceeds the %d input sequences; using %d",
+                    n_groups, len(nucl_lengths), len(nucl_lengths))
+        n_groups = len(nucl_lengths)
+
+    cascade_kwargs = dict(
         protein_stages=[x.strip() for x in args.stages.split(",")],
-        n_workers=args.processors,
         compat_rounding=args.compat_tesorter_rounding,
         compat_voting=args.compat_tesorter_voting,
         mask_stops=args.mask_stops,
         min_clade_delta=args.min_clade_delta,
         seq_type=args.seq_type)
+
+    rounds = {"primary": 0, "subordinate": 1}
+
+    def _search(fasta, names, tag):
+        """One search round, partitioned or not, over the named databases."""
+        paths = {n: db_paths[n] for n in names}
+        alphas = {n: db_alphabets[n] for n in names}
+        if n_groups and n_groups > 1:
+            from . import partition
+            return partition.run_partitioned(
+                conn, fasta, paths, alphas, os.path.join(outdir, tag),
+                n_groups, args.processors,
+                dict(cascade_kwargs, n_workers=1),
+                round_index=rounds[tag])
+        return hierarchical_search.run_cascade(
+            conn, fasta, paths, alphas, outdir,
+            n_workers=args.processors, **cascade_kwargs)
+
+    per_db_results = _search(args.sequence, primary_names, "primary")
 
     log.info("Indexing hits tables")
     index_hits_tables(conn)
@@ -450,17 +487,7 @@ def main():
                                         set(remaining), exclude=False)
             log.info("  %d sequences unclassified by the primary arm",
                      n_written)
-            sub_per_db = hierarchical_search.run_cascade(
-                conn, sub_fa,
-                {n: db_paths[n] for n in sub_names},
-                {n: db_alphabets[n] for n in sub_names}, outdir,
-                protein_stages=[x.strip() for x in args.stages.split(",")],
-                n_workers=args.processors,
-                compat_rounding=args.compat_tesorter_rounding,
-                compat_voting=args.compat_tesorter_voting,
-                mask_stops=args.mask_stops,
-                min_clade_delta=args.min_clade_delta,
-                seq_type=args.seq_type)
+            sub_per_db = _search(sub_fa, sub_names, "subordinate")
             index_hits_tables(conn)
             # Reconciled among themselves only -- the collections are disjoint
             # slices of one library, so two of them hitting the same sequence

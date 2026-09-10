@@ -215,7 +215,8 @@ def _parse_domain_type(query_name):
     return query_name.split("_")[0]
 
 
-def _hits_to_rows(hits, db_name, search_mode=0, engine="", stage=0):
+def _hits_to_rows(hits, db_name, search_mode=0, engine="", stage=0,
+                  id_counter=None):
     """Convert hit dicts to insert-ready tuples.
 
     engine/stage stamp cascade provenance onto every row; they default to the
@@ -226,7 +227,16 @@ def _hits_to_rows(hits, db_name, search_mode=0, engine="", stage=0):
         base_seq, strand, frame = _parse_frame_info(h["target_name"])
         domain_type = _parse_domain_type(h["query_name"])
 
-        rows.append((
+        # id_counter is a one-element list holding the next id to hand out.
+        # A partitioned run gives each worker a disjoint range so its rows are
+        # globally unique the moment they are written, and merging is a plain
+        # copy rather than a renumbering.
+        prefix = ()
+        if id_counter is not None:
+            prefix = (id_counter[0],)
+            id_counter[0] += 1
+
+        rows.append(prefix + (
             db_name,
             h["target_name"],
             base_seq,
@@ -259,14 +269,20 @@ def _hits_to_rows(hits, db_name, search_mode=0, engine="", stage=0):
     return rows
 
 
-def store_legacy(conn, hits, db_name, engine="", stage=0):
-    """Store search hits to legacy_hits, the only hits table."""
+def store_legacy(conn, hits, db_name, engine="", stage=0, id_counter=None):
+    """Store search hits to legacy_hits, the only hits table.
+
+    `id_counter`, when given, is a one-element list holding the next row id.
+    Partitioned runs use it to give each worker a disjoint id range; without it
+    SQLite assigns ids as before.
+    """
     rows = _hits_to_rows(hits, db_name, search_mode=0, engine=engine,
-                         stage=stage)
+                         stage=stage, id_counter=id_counter)
+    cols = _INSERT_COLS if id_counter is None else "id, " + _INSERT_COLS
+    marks = (_INSERT_PLACEHOLDERS if id_counter is None
+             else "?, " + _INSERT_PLACEHOLDERS)
     conn.executemany(
-        f"INSERT INTO legacy_hits ({_INSERT_COLS}) VALUES ({_INSERT_PLACEHOLDERS})",
-        rows,
-    )
+        f"INSERT INTO legacy_hits ({cols}) VALUES ({marks})", rows)
     conn.commit()
 
 
