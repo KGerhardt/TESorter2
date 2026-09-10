@@ -11,7 +11,7 @@ from .sequence import parse_frame_suffix, aa_to_nucl_coords, load_sequences_dict
 
 
 _HIT_COLUMNS = """
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER NOT NULL,
     database    TEXT NOT NULL,
     target_name TEXT NOT NULL,
     base_seq    TEXT NOT NULL,
@@ -41,6 +41,15 @@ _HIT_COLUMNS = """
     engine      TEXT NOT NULL DEFAULT '',
     stage       INTEGER NOT NULL DEFAULT 0
 """
+# `id` is the hit's sequence position in the original input, not a row
+# identifier and deliberately not the rowid. Making it INTEGER PRIMARY KEY
+# aliased it onto the rowid, which meant inserting a row dictated where it
+# landed in the B-tree: a partitioned run merging groups in completion order
+# wrote non-monotonic rowids and paid page splits instead of appending. The
+# rowid is now arbitrary and never touched, so every insert appends and merge
+# order stops mattering. `id` carries what is actually useful -- where the
+# sequence sat in the input -- and is stable no matter how the input was split.
+#
 # engine/stage are the cascade's provenance: which tool produced a hit and at
 # which position in the per-database cascade. A single-engine run leaves engine
 # at the tool's own name and stage at 0. They are on the hit rows rather than
@@ -216,7 +225,7 @@ def _parse_domain_type(query_name):
 
 
 def _hits_to_rows(hits, db_name, search_mode=0, engine="", stage=0,
-                  id_counter=None):
+                  seq_index=None):
     """Convert hit dicts to insert-ready tuples.
 
     engine/stage stamp cascade provenance onto every row; they default to the
@@ -227,16 +236,8 @@ def _hits_to_rows(hits, db_name, search_mode=0, engine="", stage=0,
         base_seq, strand, frame = _parse_frame_info(h["target_name"])
         domain_type = _parse_domain_type(h["query_name"])
 
-        # id_counter is a one-element list holding the next id to hand out.
-        # A partitioned run gives each worker a disjoint range so its rows are
-        # globally unique the moment they are written, and merging is a plain
-        # copy rather than a renumbering.
-        prefix = ()
-        if id_counter is not None:
-            prefix = (id_counter[0],)
-            id_counter[0] += 1
-
-        rows.append(prefix + (
+        rows.append((
+            -1 if seq_index is None else seq_index.get(base_seq, -1),
             db_name,
             h["target_name"],
             base_seq,
@@ -269,20 +270,18 @@ def _hits_to_rows(hits, db_name, search_mode=0, engine="", stage=0,
     return rows
 
 
-def store_legacy(conn, hits, db_name, engine="", stage=0, id_counter=None):
+def store_legacy(conn, hits, db_name, engine="", stage=0, seq_index=None):
     """Store search hits to legacy_hits, the only hits table.
 
-    `id_counter`, when given, is a one-element list holding the next row id.
-    Partitioned runs use it to give each worker a disjoint id range; without it
-    SQLite assigns ids as before.
+    `seq_index` maps a sequence name to its position in the original input;
+    that position is written to the `id` column. Without it the column is -1,
+    which says "position unknown" rather than inventing an order.
     """
     rows = _hits_to_rows(hits, db_name, search_mode=0, engine=engine,
-                         stage=stage, id_counter=id_counter)
-    cols = _INSERT_COLS if id_counter is None else "id, " + _INSERT_COLS
-    marks = (_INSERT_PLACEHOLDERS if id_counter is None
-             else "?, " + _INSERT_PLACEHOLDERS)
+                         stage=stage, seq_index=seq_index)
     conn.executemany(
-        f"INSERT INTO legacy_hits ({cols}) VALUES ({marks})", rows)
+        f"INSERT INTO legacy_hits (id, {_INSERT_COLS}) "
+        f"VALUES (?, {_INSERT_PLACEHOLDERS})", rows)
     conn.commit()
 
 

@@ -443,7 +443,9 @@ def main():
         min_clade_delta=args.min_clade_delta,
         seq_type=args.seq_type)
 
-    rounds = {"primary": 0, "subordinate": 1}
+    # A hit's `id` is its sequence's position in the input, so the map is the
+    # same for every worker and every round.
+    seq_index = {name: i for i, name in enumerate(nucl_lengths)}
 
     def _search(fasta, names, tag, subset=None):
         """One search round, partitioned or not, over the named databases."""
@@ -459,10 +461,10 @@ def main():
                 conn, fasta, paths, alphas, os.path.join(outdir, tag),
                 n_groups, args.processors,
                 dict(cascade_kwargs, n_workers=1),
-                round_index=rounds[tag], lengths=lengths)
+                seq_index=seq_index, lengths=lengths)
         return hierarchical_search.run_cascade(
             conn, fasta, paths, alphas, outdir,
-            n_workers=args.processors, **cascade_kwargs)
+            n_workers=args.processors, seq_index=seq_index, **cascade_kwargs)
 
     per_db_results = _search(args.sequence, primary_names, "primary")
 

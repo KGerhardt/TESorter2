@@ -66,15 +66,6 @@ import pyfastx
 
 log = logging.getLogger(__name__)
 
-# Row-id space. Each worker owns ID_STRIDE ids and each search round owns
-# ROUND_STRIDE, because a run makes more than one partitioned round -- the
-# primary databases and then the subordinate ones -- and two rounds numbering
-# from the same base collide on legacy_hits.id. 128 groups reach 1.3e14 within
-# a round, well inside ROUND_STRIDE, and sqlite's rowid ceiling is 9.2e18.
-ID_STRIDE = 10 ** 12
-ROUND_STRIDE = 10 ** 15
-
-
 def sequence_lengths(fasta):
     """[(name, length)] straight out of pyfastx's index.
 
@@ -163,7 +154,7 @@ def _worker(job):
     to its own database, which the parent merges.
     """
     (idx, fasta, db_paths, db_alphabets, outdir, kwargs,
-     search_space_mb, evalue_scale, id_base) = job
+     search_space_mb, evalue_scale, seq_index) = job
     from .results import create_db
     from . import hierarchical_search
 
@@ -179,7 +170,7 @@ def _worker(job):
         per_db = hierarchical_search.run_cascade(
             conn, fasta, db_paths, db_alphabets, work,
             search_space_mb=search_space_mb, evalue_scale=evalue_scale,
-            id_base=id_base, **kwargs)
+            seq_index=seq_index, **kwargs)
         conn.commit()
     finally:
         conn.close()
@@ -222,25 +213,24 @@ def merge_databases(conn, part_paths):
                         "CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
                 info = list(conn.execute("PRAGMA part.table_info(%s)" % t))
                 # (cid, name, type, notnull, default, pk)
-                has_rowid_alias = any(
-                    c[5] and (c[2] or "").upper() == "INTEGER" for c in info)
+                keyed = any(c[5] for c in info)
                 want = conn.execute(
                     "SELECT COUNT(*) FROM part.%s" % t).fetchone()[0]
                 before = conn.execute(
                     "SELECT COUNT(*) FROM main.%s" % t).fetchone()[0]
-                # Ids were handed out disjoint, so a straight copy is correct.
-                # OR IGNORE only where the key is real data the parent may
-                # already hold, as with sequences.name.
-                verb = "INSERT" if has_rowid_alias else "INSERT OR IGNORE"
+                # `SELECT *` returns the declared columns only, never the
+                # rowid, so the parent assigns its own and every row appends --
+                # whatever order the groups happen to finish in. OR IGNORE only
+                # where the key is real data the parent may already hold, as
+                # with sequences.name.
+                verb = "INSERT OR IGNORE" if keyed else "INSERT"
                 conn.execute("%s INTO main.%s SELECT * FROM part.%s"
                              % (verb, t, t))
                 after = conn.execute(
                     "SELECT COUNT(*) FROM main.%s" % t).fetchone()[0]
-                if has_rowid_alias and after - before != want:
-                    raise RuntimeError(
-                        "merging %s from %s copied %d of %d rows -- id ranges "
-                        "are meant to be disjoint" % (t, path,
-                                                      after - before, want))
+                if not keyed and after - before != want:
+                    raise RuntimeError("merging %s from %s copied %d of %d rows"
+                                       % (t, path, after - before, want))
                 n_rows += after - before
             conn.commit()
         except Exception:
@@ -257,12 +247,14 @@ def merge_databases(conn, part_paths):
 
 
 def run_partitioned(conn, input_fasta, db_paths, db_alphabets, outdir,
-                    n_groups, n_workers, cascade_kwargs, round_index=0,
+                    n_groups, n_workers, cascade_kwargs, seq_index=None,
                     lengths=None):
     """Search the input in `n_groups` independent groups. Returns per_db.
 
-    `round_index` separates the id space of one round from the next; a run
-    partitions the primary databases and then the subordinate ones.
+    `seq_index` maps a sequence name to its position in the original input and
+    is written to each hit's `id`. It is the same map for every worker: the
+    position is a property of the input, not of the group a sequence landed in,
+    so nothing has to be reserved, strided or renumbered.
     """
     groups, sizes, total_residues = plan_groups(input_fasta, n_groups,
                                                 lengths=lengths)
@@ -275,13 +267,8 @@ def run_partitioned(conn, input_fasta, db_paths, db_alphabets, outdir,
         # nail's E-values improve in proportion to how much smaller its target
         # set is; this puts them back on the whole input's scale.
         scale = (total_residues / size) if size else 1.0
-        # Disjoint id ranges, assigned up front. A stride this large cannot
-        # be exhausted by a partition -- 128 groups reach 1.3e14 against
-        # sqlite's 9.2e18 rowid ceiling -- so worker rows are globally unique
-        # as written and merging is a plain copy.
         jobs.append((i, p, db_paths, db_alphabets, part_dir, cascade_kwargs,
-                     search_space_mb, scale,
-                     round_index * ROUND_STRIDE + i * ID_STRIDE))
+                     search_space_mb, scale, seq_index))
 
     log.info("Searching %d groups across %d workers, one thread each",
              n_groups, min(n_groups, n_workers))
