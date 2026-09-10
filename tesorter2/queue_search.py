@@ -202,8 +202,14 @@ def run_queued(conn, input_fasta, db_paths, db_alphabets, outdir, n_groups,
             live = [i for i in range(n_groups) if remaining[i]]
             if not runners or not live:
                 continue
+            # One workdir per TASK, not per (chunk, level). Databases at a
+            # level run concurrently on different workers here, and nail takes
+            # a --tmp-dir under the workdir: sharing it means seven nail
+            # processes writing the same scratch directory at once. The chunked
+            # scheduler runs a chunk's databases in series, so it never hit
+            # this.
             jobs = [(i, db, level, eng, frozenset(remaining[i]),
-                     os.path.join(part_dir, "chunk%03d" % i, "L%d" % level))
+                     os.path.join(part_dir, "chunk%03d" % i, "L%d" % level, db))
                     for i in live for db, eng in runners]
             log.info("--- Level %d: %d tasks (%d chunks x %d databases) ---",
                      level, len(jobs), len(live), len(runners))
