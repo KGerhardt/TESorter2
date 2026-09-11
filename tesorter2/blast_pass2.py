@@ -25,22 +25,38 @@ log = logging.getLogger(__name__)
 
 
 def _get_classified_ids(conn):
-    """Get classified sequence IDs per database from classifier results.
+    """Which databases produced hits on each sequence.
+
+    Reads the hit_seqs summary table, which store_legacy fills as the hits go
+    in, and dedupes here in Python. The table is append-only and carries
+    repeats across store_legacy calls; a set drops them far faster than asking
+    sqlite to.
+
+    This used to be `SELECT DISTINCT base_seq, database FROM legacy_hits`,
+    a scan of every hit row in the run to recover a few hundred thousand
+    distinct pairs. It cost 26 s of a 1,066 s partitioned run.
 
     Returns:
-        classified: {base_seq: set(databases)} — which databases classified each seq
+        classified: {base_seq: set(databases)}
     """
-    classified = defaultdict(set)
-
-    # Check which tables exist
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
 
-    if "legacy_hits" in tables:
-        for row in conn.execute(
-            "SELECT DISTINCT base_seq, database FROM legacy_hits"
-        ):
-            classified[row[0]].add(row[1])
+    classified = defaultdict(set)
+    if "hit_seqs" in tables:
+        for base_seq, database in conn.execute(
+                "SELECT base_seq, database FROM hit_seqs"):
+            classified[base_seq].add(database)
+
+    # A results database written before hit_seqs existed, or by a path that
+    # does not go through store_legacy, still has to be readable. Falling back
+    # costs the old 26 s, which is the right trade for not silently treating
+    # every sequence as unclassified.
+    if not classified and "legacy_hits" in tables:
+        log.info("  No hit_seqs table; recovering targets from legacy_hits")
+        for base_seq, database in conn.execute(
+                "SELECT base_seq, database FROM legacy_hits"):
+            classified[base_seq].add(database)
 
     return dict(classified)
 

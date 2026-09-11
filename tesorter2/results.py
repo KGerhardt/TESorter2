@@ -66,6 +66,27 @@ CREATE TABLE IF NOT EXISTS sequences (
 CREATE TABLE IF NOT EXISTS legacy_hits (
     {_HIT_COLUMNS}
 );
+
+-- Which (sequence, database) pairs produced any hit at all: the only thing
+-- BLAST pass-2 needs in order to pick its targets, and the only question
+-- anything asks of the hit rows during a run.
+--
+-- It exists so that nobody has to ask sqlite for it. The old route was
+-- `SELECT DISTINCT base_seq, database FROM legacy_hits`, which is a scan of
+-- every hit in the run -- 8.38 M rows to learn about 350 k facts, 26 s of a
+-- 1,066 s run. store_legacy fills this table instead, deduping in Python
+-- over rows it already holds, and pass-2 reads it back with a bare SELECT
+-- and dedupes in Python again. No DISTINCT, no WHERE, no index: sqlite only
+-- ever appends to this table and hands the whole of it back.
+--
+-- Deliberately not keyed. A primary key would dedupe across store_legacy
+-- calls for us, but only by making every insert an index probe, and it would
+-- make partition.merge fall back to INSERT OR IGNORE. Repeats across calls
+-- are cheap to carry and free to drop on read.
+CREATE TABLE IF NOT EXISTS hit_seqs (
+    base_seq    TEXT NOT NULL,
+    database    TEXT NOT NULL
+);
 """
 
 # Every index here is built at the end of a run, by finalize_db. None of them
@@ -145,6 +166,11 @@ _INSERT_COLS = (
 # Derived from _INSERT_COLS rather than hardcoded: the two must always agree,
 # and a stale count fails at insert time with an unhelpful message.
 _INSERT_PLACEHOLDERS = ", ".join(["?"] * len(_INSERT_COLS.split(",")))
+
+# Where base_seq sits in the tuples store_legacy inserts. The id column is
+# prepended to _INSERT_COLS, so everything shifts by one. Derived for the same
+# reason _INSERT_PLACEHOLDERS is.
+_BASE_SEQ_POS = 1 + [c.strip() for c in _INSERT_COLS.split(",")].index("base_seq")
 
 
 def create_db(db_path):
@@ -333,6 +359,13 @@ def store_legacy(conn, hits, db_name, engine="", stage=0, seq_index=None):
     conn.executemany(
         f"INSERT INTO legacy_hits (id, {_INSERT_COLS}) "
         f"VALUES (?, {_INSERT_PLACEHOLDERS})", rows)
+    # Summarise as the rows go in. One pass over a list already in memory,
+    # and the set collapses a database's hits on a sequence to the single
+    # fact pass-2 needs. In a partitioned run this is per worker, so it is
+    # 64-way parallel and the parent never reads legacy_hits at all.
+    conn.executemany(
+        "INSERT INTO hit_seqs (base_seq, database) VALUES (?, ?)",
+        {(r[_BASE_SEQ_POS], db_name) for r in rows})
     conn.commit()
 
 
