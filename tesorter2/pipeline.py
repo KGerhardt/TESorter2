@@ -19,8 +19,7 @@ import time
 from .paths import get_db_dir
 from .hmm import peek_alphabet, AMINO_ALPHABET
 from .sequence import open_input, looks_nucleotide
-from .results import (create_db, store_sequences,
-                     index_hits_tables, finalize_db)
+from .results import create_db, store_sequences, finalize_db
 from .classifier import (export_classification_tsv, store_classifications,
                        reconcile_classifications)
 from .blast_pass2 import blast_pass2
@@ -499,9 +498,9 @@ def main():
 
     per_db_results = _search(args.sequence, primary_names, "primary")
 
-    log.info("Indexing hits tables")
-    index_hits_tables(conn)
-
+    # No index build here. reconcile_classifications works off per_db_results,
+    # the objects the cascade just returned, and never reads the database; the
+    # legacy_hits indexes are built once at the end by finalize_db.
     # Reconcile across databases via hierarchical weighted vote
     reconciled = reconcile_classifications(per_db_results)
     all_classifications = {r["id"]: r for r in reconciled}
@@ -526,7 +525,6 @@ def main():
                      n_written)
             sub_per_db = _search(sub_fa, sub_names, "subordinate",
                                  subset=remaining)
-            index_hits_tables(conn)
             # Reconciled among themselves only -- the collections are disjoint
             # slices of one library, so two of them hitting the same sequence
             # is ordinary agreement, not a cross-database conflict.

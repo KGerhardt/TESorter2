@@ -787,7 +787,7 @@ def main(argv=None):
 
     from .paths import get_db_dir
     from .pipeline import DB_ALIASES, resolve_db
-    from .results import create_db, store_sequences, index_hits_tables, finalize_db
+    from .results import create_db, store_sequences, finalize_db
     from .classifier import (export_classification_tsv,
                              reconcile_classifications)
 
@@ -864,8 +864,8 @@ def main(argv=None):
         compat_voting=args.compat_tesorter_voting,
         mask_stops=args.mask_stops)
 
-    index_hits_tables(conn)
-
+    # Indexes are built by finalize_db at the end; nothing below reads
+    # legacy_hits through one.
     for name, results in per_db.items():
         if results:
             tsv = os.path.join(outdir, "%s.%s.cls.tsv" % (prefix, name))

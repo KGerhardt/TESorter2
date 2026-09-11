@@ -121,7 +121,7 @@ def main():
     from .search import build_sequence_block, legacy_search
     from .sequence import translate_fasta, open_input, clean_seq
     from .results import (create_db, store_sequences, store_legacy,
-                         index_hits_tables, finalize_db)
+                         finalize_db)
     from .classifier import (classify_sequences, export_classification_tsv,
                             store_classifications, DB_CONFIGS)
     from .blast_pass2 import blast_pass2
@@ -183,9 +183,9 @@ def main():
                 config = v
                 break
 
-    # Build hits-table indexes before the classification reads
-    index_hits_tables(conn)
-
+    # No index build before the read below. This mode searches one database,
+    # so `WHERE database = ?` matches essentially every row and an index on
+    # that column only adds a rowid lookup per row. finalize_db builds them.
     if config:
         db_hits = load_hits(db_out, table="legacy_hits", database=db_arg)
         if db_hits:

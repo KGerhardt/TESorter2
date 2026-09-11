@@ -68,17 +68,42 @@ CREATE TABLE IF NOT EXISTS legacy_hits (
 );
 """
 
-# Index creation is split by pipeline phase.
+# Every index here is built at the end of a run, by finalize_db. None of them
+# exists while the pipeline is working. They are for querying the finished
+# database afterwards.
 #
-# _HITS_TABLE_INDEXES: built once the search phase finishes writing all
-#   HMM hits and before the deconfliction/classification phase begins.
-#   Those phases read from legacy_hits via filters on
-#   database / base_seq / domain_type, which benefit from an index.
+# _HITS_TABLE_INDEXES used to be built mid-run, after the search phase and
+# before classification, on the belief that classification read legacy_hits
+# through them. It does not: reconcile_classifications takes the Python
+# objects the cascade already returned and never touches the connection.
+# On a 135k-sequence run that build cost 44 s and the reconciliation it was
+# meant to serve cost 0.03 s.
 #
-# _FINAL_INDEXES: built at the very end of the pipeline, after
-#   classifications and blast_hits are fully populated. Neither table
-#   is read during pipeline execution; these indexes exist for post-run
-#   interactive analysis.
+# Worse, the two things that DO read legacy_hits during a run were both made
+# slower by having them. `EXPLAIN QUERY PLAN` on this schema:
+#
+#   SELECT * FROM legacy_hits WHERE database = ?
+#       SEARCH legacy_hits USING INDEX idx_leg_db (database=?)
+#   SELECT DISTINCT base_seq, database FROM legacy_hits
+#       SCAN legacy_hits USING INDEX idx_leg_baseseq
+#       USE TEMP B-TREE FOR DISTINCT
+#
+# `database` holds eight distinct values, so the first plan pulls a third of
+# the table through random rowid lookups where a sequential scan would do.
+# The second scans an index and then does a rowid lookup per row to fetch
+# `database`, turning one sequential pass into a table's worth of random
+# reads. Random access is exactly the pattern the parallel filesystem a
+# cluster run writes to handles worst.
+#
+# The trade is not free in one direction: without an index, tesorter_output
+# scans the whole table once per database instead of seeking, which costs the
+# small databases (tir is 0.6% of rows) what it saves the large ones (rexdb is
+# a third). That read totalled 13.6 s across eight databases with the indexes
+# present, against 44 s to build them, so the net is clearly positive -- and
+# under --memory-db the scans are at RAM speed and the question disappears.
+#
+# The split between the two lists is kept because they cover different tables:
+# classifications and blast_hits are created on demand and may not exist.
 _HITS_TABLE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_leg_target  ON legacy_hits(target_name)",
     "CREATE INDEX IF NOT EXISTS idx_leg_baseseq ON legacy_hits(base_seq)",
@@ -131,7 +156,7 @@ def create_db(db_path):
     .db, e.g. writing a second mode into a companion file) still gets
     the full benefit of deferred indexing: any indexes built by a
     prior finalize_db are dropped here and rebuilt at the end of this
-    run via index_hits_tables + finalize_db.
+    run by finalize_db.
     """
     conn = sqlite3.connect(db_path)
     # WAL trades a tiny durability window (losing only the last transaction
@@ -175,12 +200,12 @@ def backup_to(conn, db_path):
 
 
 def index_hits_tables(conn):
-    """Build indexes on legacy_hits.
+    """Build the legacy_hits indexes.
 
-    Call after the HMM search phase is complete (all hits written) and
-    before the classification/deconfliction phase begins. The subsequent
-    reads filter by database / base_seq / domain_type and benefit from
-    these indexes; inserts during the search phase do not.
+    Called by finalize_db, at the end of a run. Do not call it during one:
+    nothing in a pipeline run reads legacy_hits in a way these indexes help,
+    and two things read it in ways they actively hurt. The comment on
+    _HITS_TABLE_INDEXES has the query plans.
     """
     for stmt in _HITS_TABLE_INDEXES:
         conn.execute(stmt)
@@ -188,17 +213,21 @@ def index_hits_tables(conn):
 
 
 def finalize_db(conn):
-    """Build the remaining indexes and checkpoint the WAL.
+    """Build every index and checkpoint the WAL.
 
     Call once at the end of the pipeline, after classifications and
     blast_hits are fully populated. Truncating the WAL into the main
     database file leaves the output as a single self-contained .db with
     no sidecar -wal file.
 
+    This is the only place indexes are built. A run works against an
+    unindexed legacy_hits on purpose; see the comment on _HITS_TABLE_INDEXES.
+
     Tables classifications and blast_hits are created on-demand by
     their writer functions; if a pipeline run skipped those phases
     the table may not exist and its index is silently skipped.
     """
+    index_hits_tables(conn)
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     for stmt in _FINAL_INDEXES:
