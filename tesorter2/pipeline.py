@@ -140,31 +140,6 @@ def _add_shared(p):
                         "[default: the databases bundled with the package]")
     p.add_argument("-p", "--processors", type=int, default=4,
                    help="Processors to use [default: 4]")
-    p.add_argument("--partition", type=int, default=0, metavar="N",
-                   help="Split the input into N balanced groups and search "
-                        "each in its own single-threaded worker. The cascade "
-                        "decides per sequence, so a group is independent and "
-                        "the results concatenate; E-values are held on the "
-                        "whole input's scale so a verdict cannot depend on "
-                        "which group a sequence landed in. Use N=0 (default) "
-                        "for the existing behaviour, or -1 for one group per "
-                        "processor. Most of a run's wall clock sits in nhmmer "
-                        "and nail, which parallelise over queries rather than "
-                        "targets; this is the other axis.")
-    p.add_argument("--memory-db", action="store_true", default=False,
-                   help="Build the results database in RAM and copy it to disk "
-                        "in one sequential pass at the end. Index creation is "
-                        "random-write, which is the worst case for the "
-                        "parallel filesystems cluster runs write to. Costs "
-                        "memory proportional to the hit count and loses the "
-                        "results if the run dies before finishing.")
-    p.add_argument("--partition-queue", action="store_true", default=False,
-                   help="With --partition, schedule (chunk x database) tasks "
-                        "from one queue per cascade level instead of giving "
-                        "each worker a whole chunk. A slow chunk is then "
-                        "shared across workers rather than owned by one, so "
-                        "the tail is a single search rather than a chunk's "
-                        "entire cascade.")
     p.add_argument("--include-sine-so", action="store_true", default=False,
                    help="Include the SINE_SO model (M=4176) in AnnoSINE "
                         "searches. Excluded by default: it costs 71%% of "
@@ -194,6 +169,40 @@ def parse_args(argv=None):
                     "combined call, and a BLAST pass-2 over whatever no "
                     "database classified.")
     _add_shared(seq)
+    # Partitioning and the in-memory results database belong to this mode only.
+    # Genome mode dispatches to the domain scanner and returns before any of
+    # the code they touch, so advertising them there would be a lie in --help.
+    seq.add_argument("--no-partition", dest="partition", action="store_false",
+                     default=True,
+                     help="Search the input as one unit instead of splitting "
+                          "it across independent single-threaded workers. "
+                          "Partitioning is on by default and uses one group "
+                          "per processor: most of a run's wall clock sits in "
+                          "nhmmer and nail, which parallelise over queries "
+                          "rather than targets, and splitting the targets is "
+                          "the other axis. On 135k sequences over 64 cores it "
+                          "is 4.6x faster. The cascade decides per sequence, "
+                          "so a group is independent and the results "
+                          "concatenate, and E-values are held on the whole "
+                          "input's scale so a verdict cannot depend on which "
+                          "group a sequence landed in. Use this flag to get "
+                          "the unpartitioned behaviour back.")
+    seq.add_argument("--memory-db", action="store_true", default=False,
+                     help="Build the results database in RAM and copy it to "
+                          "disk in one sequential pass at the end. Index "
+                          "creation is random-write, which is the worst case "
+                          "for the parallel filesystems cluster runs write "
+                          "to. Costs memory proportional to the hit count and "
+                          "loses the results if the run dies before "
+                          "finishing.")
+    seq.add_argument("--partition-queue", action="store_true", default=False,
+                     help="Schedule (chunk x database) tasks from one queue "
+                          "per cascade level instead of giving each worker a "
+                          "whole chunk. Measured slower than the default on "
+                          "the Repbase library (18:16 against 17:46), because "
+                          "the chunks are already balanced to within 9%% and "
+                          "the rescheduling buys nothing; kept because that "
+                          "may not hold for every input.")
     seq.add_argument(
         "-st", "--seq-type", choices=("nucl", "prot"), default="nucl",
         help="Alphabet of the input sequences. 'prot' takes amino acids "
@@ -441,14 +450,15 @@ def main():
         log.info("Subordinate (searched only on what the primary arm leaves): "
                  "%s", ", ".join(sub_names))
 
-    # Partitioned mode is opt-in. Autodetection is deliberately not attempted:
-    # the useful group count depends on the input, and a flag keeps that the
-    # caller's decision until there is a rule worth trusting.
-    n_groups = args.partition
-    if n_groups == -1:
-        n_groups = args.processors
+    # Partitioning is on by default, one group per processor. There is no
+    # group-count knob: the groups are balanced on residues to 0.00% and
+    # over-decomposing measured worse, not better -- 256 groups over 64 cores
+    # made the engines do 20% more total work for the same hits, because each
+    # invocation reloads its models. One group per worker is the whole design.
+    n_groups = args.processors if args.partition else 0
     if n_groups and n_groups > len(nucl_lengths):
-        log.warning("--partition %d exceeds the %d input sequences; using %d",
+        log.warning("%d processors exceeds the %d input sequences; "
+                    "partitioning into %d groups",
                     n_groups, len(nucl_lengths), len(nucl_lengths))
         n_groups = len(nucl_lengths)
 

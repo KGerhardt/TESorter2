@@ -330,6 +330,9 @@ tesorter2 <sequence> [options]
 | `--dna-engine` | `nhmmer` | Engine for DNA databases (`nhmmer` or `hmmsearch`) |
 | `--prefix` | input basename | Output file prefix |
 | `-p`, `--processors` | `4` | Processors |
+| `--no-partition` | partitioning **on** | `sequences` mode only. Searches the input as one unit instead of one balanced group per processor. Partitioning is the default and is 4.6x faster on 135k sequences over 64 cores |
+| `--memory-db` | off | `sequences` mode only. Build the results database in RAM and copy it out once at the end |
+| `--partition-queue` | off | `sequences` mode only. Schedule (chunk x database) tasks from one queue per cascade level. Measured slower than the default |
 | `--bath` | off | Frameshift-aware BATH engine (AA databases only; implied by `--genome`) |
 | `--stages` | off | Staged multi-engine cascade over AA databases, e.g. `nail,hmmer,bath` |
 | `--mask-stops` | off | Translate stop codons as `X` instead of `*`, letting profiles align through premature stops |
