@@ -23,7 +23,10 @@ de:f is used. Otherwise dv:f. If neither is present, the line is skipped.
 OUTPUT (TSV; --header to add a header):
     qname  pass  pid  eff_qcov  eff_tcov  best_tname
 
-PARSIMONY RULE for pid (same as the CIGAR-aware sibling):
+pid, eff_qcov and eff_tcov describe one match: the best chain of alignments on
+one strand, in order along both sequences (colinear_metrics).
+
+PARSIMONY RULE for pid with --fill-colinear-gaps (same as the CIGAR-aware sibling):
     1. Drop alignments fully encompassed by another on q (encompassing aln has
        more statistical power).
     2. Sort survivors by dv:f DESCENDING (densest first).
@@ -214,14 +217,55 @@ def chained_intervals(alignments, max_gap=5000, gap_tol=0.20):
     return q_ivs, t_ivs
 
 
+def colinear_metrics(alignments, qlen, tlen, slack=20):
+    """Return (pid, qcov, tcov) of the best chain of alignments that can be one match.
+
+    Pieces add up only when they sit on one strand and run in the same order
+    along both sequences (the target runs backwards on '-'), each starting at
+    most `slack` bp before the previous one ends; bases shared with the previous
+    piece count once. A match broken by an indel or insertion still adds up, but
+    one query stretch aligned to several parts of the target covers it only once.
+    The chain kept maximises the summed per-piece min(qcov, tcov), and pid is its
+    identity (1 - div, weighted by query bases), so all three describe one match.
+    """
+    if qlen <= 0 or tlen <= 0:
+        return 0.0, 0.0, 0.0
+    best = (0.0, 0.0, 0.0, 0.0)
+    for strand in ("+", "-"):
+        pieces = sorted(
+            (a["qstart"], a["qend"], a["tstart"], a["tend"], a["div"]) if strand == "+"
+            else (a["qstart"], a["qend"], tlen - a["tend"], tlen - a["tstart"], a["div"])
+            for a in alignments if a["strand"] == strand)
+        chains = []  # best chain ending at each piece: (score, qcov, tcov, identical bases)
+        for i, (qs, qe, ts, te, div) in enumerate(pieces):
+            qc, tc = (qe - qs) / qlen, (te - ts) / tlen
+            cur = (min(qc, tc), qc, tc, (1 - div) * (qe - qs))
+            for (_, pqe, _, pte, _), (score, pqc, ptc, same) in zip(pieces[:i], chains):
+                if qs < pqe - slack or ts < pte - slack or qe <= pqe or te <= pte:
+                    continue
+                nq = qe - max(qs, pqe)
+                dq, dt = nq / qlen, (te - max(ts, pte)) / tlen
+                cur = max(cur, (score + min(dq, dt), pqc + dq, ptc + dt,
+                                same + (1 - div) * nq))
+            chains.append(cur)
+            best = max(best, cur)
+    pid = best[3] / (best[1] * qlen) if best[1] > 0 else 0.0
+    return pid, best[1], best[2]
+
+
 def compute_pair_metrics(alignments, qlen, tlen,
                          fill_colinear=False, max_gap=5000, gap_tol=0.20):
     """Compute (pid, eff_qcov, eff_tcov) for one (q,t) pair, span-based.
 
     `alignments` is a non-empty list of dicts: {qstart, qend, tstart, tend, div}.
-    If fill_colinear is True, colinear-chain inner gaps on q and t are bridged
-    in the qcov/tcov computation (pid logic is unchanged either way).
+    By default all three describe the best chain of in-order alignments
+    (colinear_metrics). If fill_colinear is True, pid follows the parsimony rule
+    over all alignments and colinear-chain inner gaps on q and t are bridged in
+    the qcov/tcov computation.
     """
+    if not fill_colinear:
+        return colinear_metrics(alignments, qlen, tlen)
+
     # Build per-alignment span intervals (no CIGAR -- one interval each).
     for a in alignments:
         a["q_iv"] = [(a["qstart"], a["qend"])]
@@ -271,20 +315,13 @@ def compute_pair_metrics(alignments, qlen, tlen,
     total_unique_len = interval_total(claimed_q_all)
     pid = (1.0 - total_unique_mut / total_unique_len) if total_unique_len > 0 else 0.0
 
-    # eff_qcov, eff_tcov: union of all alignment spans (use ALL alignments,
-    # not just survivors -- encompassed ones add nothing new anyway). When
-    # fill_colinear is on, inner gaps within colinear chains are bridged before
-    # the union so a single element fragmented into HSPs counts as one span.
-    if fill_colinear:
-        q_chains, t_chains = chained_intervals(
-            alignments, max_gap=max_gap, gap_tol=gap_tol)
-        eff_qcov = interval_total(merge_intervals(q_chains)) / qlen if qlen > 0 else 0.0
-        eff_tcov = interval_total(merge_intervals(t_chains)) / tlen if tlen > 0 else 0.0
-    else:
-        all_q_iv = [iv for a in alignments for iv in a["q_iv"]]
-        all_t_iv = [iv for a in alignments for iv in a["t_iv"]]
-        eff_qcov = interval_total(merge_intervals(all_q_iv)) / qlen if qlen > 0 else 0.0
-        eff_tcov = interval_total(merge_intervals(all_t_iv)) / tlen if tlen > 0 else 0.0
+    # eff_qcov, eff_tcov: union of ALL alignment spans, with inner gaps within
+    # colinear chains bridged first so a single element fragmented into HSPs
+    # counts as one span.
+    q_chains, t_chains = chained_intervals(
+        alignments, max_gap=max_gap, gap_tol=gap_tol)
+    eff_qcov = interval_total(merge_intervals(q_chains)) / qlen if qlen > 0 else 0.0
+    eff_tcov = interval_total(merge_intervals(t_chains)) / tlen if tlen > 0 else 0.0
     return pid, eff_qcov, eff_tcov
 
 
