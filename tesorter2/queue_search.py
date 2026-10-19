@@ -1,5 +1,25 @@
 """queue_search.py — (chunk x database) tasks drained from one queue per level.
 
+DEAD END -- NOT WIRED INTO THE PIPELINE
+---------------------------------------
+This was `--partition-queue`. The CLI flag is removed and nothing imports this
+module; it is kept only as the record of an approach that was built, measured
+and rejected.
+
+It measured slower than plain partitioning on the Repbase library, 18:16
+against 17:46 at 64 cores. The premise below -- that chunk cost is badly
+unbalanced -- did not survive measurement: per-chunk cascade wall is within
+1.05-1.09x of the median, so there is no idle tail for rescheduling to recover,
+and the finer tasks only add per-task setup.
+
+Do not revive it without fixing two things first:
+  * It still uses multiprocessing.Pool, which hangs forever when a worker is
+    OOM-killed. partition.py moved to ProcessPoolExecutor for exactly this.
+  * It predates the output cleanup and --emit-timing: it writes no stage timing
+    and deletes nothing as it goes.
+
+The original rationale follows.
+
 `partition.py` gives each worker a chunk and has it run the whole cascade for
 every database. That balances badly: groups are packed to 0.00% on residues but
 cost tracks what survives the filters, and a 64-group run packed at only 70% --

@@ -14,7 +14,7 @@ actually ran against (the alias you pass to `-d` selects the database).
 |---|---|---|---|---|
 | `REXdb_protein_database_viridiplantae_v4.0_plus_metazoa_v3.1.hmm` | REXdb | `rexdb` | CC BY 4.0 | Neumann et al. 2019 |
 | `GyDB2.hmm`, `GyDB2.hmm.info` | GyDB 2.0 | `gydb` | CC BY (Attribution) | Llorens et al. 2011 — **modified, see notice** |
-| `AnnoSINE_core.hmm`, `AnnoSINE.hmm`, `SINE_SO.hmm` | AnnoSINE | `sine`, `sine-so` | MIT | Li et al. 2022 |
+| `AnnoSINE_core.hmm` | AnnoSINE | `sine` | MIT | Li et al. 2022 |
 | `Kapitonov_et_al.GENE.LINE.hmm` | Kapitonov LINE | `line` | see note | Kapitonov et al. 2009 |
 | `Yuan_and_Wessler.PNAS.TIR.hmm` | Yuan & Wessler TIR | `tir` | see note | Yuan & Wessler 2011 |
 
@@ -87,9 +87,7 @@ with p7.HMMFile(original) as fh, open(modified, "wb") as out:
 
 ## AnnoSINE — MIT
 
-SINE profiles (`AnnoSINE_core.hmm`, the full `AnnoSINE.hmm`, and the long
-`SINE_SO.hmm` model). In TEsorter2 both the `sine` and `sine-so` aliases resolve
-to AnnoSINE models.
+SINE profiles (`AnnoSINE_core.hmm`), resolved by the `sine` alias.
 
 - **License:** MIT (per the AnnoSINE repository).
 - **Source:** <https://github.com/yangli557/AnnoSINE>

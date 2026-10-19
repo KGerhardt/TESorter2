@@ -102,7 +102,7 @@ from .search import build_sequence_block, legacy_search, legacy_search_nucl
 from .sequence import translate_fasta
 from .subset import subset_fasta, base_name
 from .classifier import (classify_sequences, store_classifications,
-                         reconcile_classifications, DB_CONFIGS)
+                         reconcile_classifications, DB_CONFIGS, vote_tier)
 from .results import store_legacy
 from .search import _EVALUE_FIELDS
 from . import bath_search, nail_search
@@ -802,7 +802,7 @@ def main(argv=None):
     p.add_argument("sequence", help="Input FASTA")
     p.add_argument("-d", "--database", default=None,
                    help="Comma-separated database aliases or paths "
-                        "[default: every bundled database except sine-so]")
+                        "[default: every bundled database]")
     p.add_argument("-o", "--outdir", default=None,
                    help="Output directory [default: {input}.TEsorter2]")
     p.add_argument("--prefix", default=None, help="Output file prefix")
@@ -841,7 +841,7 @@ def main(argv=None):
     if args.database:
         db_names = [s.strip() for s in args.database.split(",")]
     else:
-        db_names = [k for k in DB_ALIASES if k != "sine-so"]
+        db_names = list(DB_ALIASES)
     db_paths = {n: resolve_db(n, db_dir=db_dir) for n in db_names}
     db_alphabets = {n: peek_alphabet(pth) for n, pth in db_paths.items()}
 
@@ -872,7 +872,8 @@ def main(argv=None):
             export_classification_tsv(results, tsv)
             log.info("  %s: %d classified -> %s", name, len(results), tsv)
 
-    reconciled = reconcile_classifications(per_db)
+    tiers = {n: vote_tier(n, db_alphabets[n]) for n in per_db}
+    reconciled = reconcile_classifications(per_db, tiers=tiers)
     log.info("Reconciled across %d databases: %d sequences",
              len(per_db), len(reconciled))
     if reconciled:

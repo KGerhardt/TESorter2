@@ -117,7 +117,6 @@ DB_CONFIGS = {
     "tir": TIR_CONFIG,
     "sine": SINE_CONFIG,
     "sine-animals": SINE_CONFIG,
-    "sine-so": SINE_CONFIG,
     "pfam-te": PFAMTE_CONFIG,
     "dfam-core": DFAMDB_CONFIG,
     "dfam-extended": DFAMDB_CONFIG,
@@ -127,6 +126,7 @@ DB_CONFIGS = {
 
 # GyDB clade map: loaded from GyDB2.hmm.info (ships alongside GyDB2.hmm)
 from .paths import get_db_dir
+from .hmm import AMINO_ALPHABET
 from .so_map import lookup as so_lookup
 _GYDB_INFO_PATH = os.path.join(get_db_dir(), "GyDB2.hmm.info")
 
@@ -840,9 +840,33 @@ def export_classification_tsv(results, out_path, include_secondary=False,
 # something. See _scope_aware_superfamily.
 UNRESOLVED_SUPERFAMILY = {"unknown", "none", "na", "n/a", ".", "-", ""}
 
+# The scope rule defers to a superfamily only one database can resolve, which
+# says nothing about how much evidence that database has for it. On Repbase
+# 31.07 the deferral is right 95 of 119 times it overrides the score vote, but
+# below a quarter of the winner's summed score it is right 1 time in 14 (GyDB
+# Retroviridae at ~0.2 taking REXdb's Gypsy at ~1.0). Requiring at least this
+# fraction of the score-vote winner's total makes it right 107 of 119.
+SCOPE_MIN_SCORE_RATIO = 0.25
+
+
+# Tiers in the primary arm's cross-database vote; lower is stronger. Only the
+# strongest tier that called a sequence votes on it. Every protein database
+# is tier 0, pfam-te included: on Repbase 31.07 its votes break Ginger ties
+# the right way and name the superfamily under REXdb's and GyDB's catch-alls
+# (97 LINE/unknown -> L1), and demoting it cost more than it saved.
+# DNA-alphabet databases (AnnoSINE) are tier 1: an nhmmer score is not on the
+# protein scale -- AnnoSINE was never right on a sequence a protein database
+# also called, yet its scores reached ten times theirs and took 48 correct
+# protein calls. Dfam is DNA too, but the pipeline runs it as a subordinate
+# round of its own, never in this vote. Shared by both pipelines, so the
+# standalone hierarchical CLI votes by the same rule.
+def vote_tier(name, alphabet):
+    return 0 if alphabet == AMINO_ALPHABET else 1
+
 
 def _scope_aware_superfamily(pool, weighted_winner, scope,
-                             unknown_competes=False):
+                             unknown_competes=False,
+                             min_score_ratio=SCOPE_MIN_SCORE_RATIO):
     """Pick the winning (harmonized) superfamily with scope-aware deferral.
 
     **An unresolved superfamily does not compete with a named one.** REXdb
@@ -868,8 +892,10 @@ def _scope_aware_superfamily(pool, weighted_winner, scope,
     can resolve that superfamily (it is uncontestable -- only this database can
     express it), and (b) the claiming database can resolve at least one of the
     competing superfamilies (it is competent about the alternatives, so its
-    different call is informative). If exactly one superfamily qualifies, it
-    wins; otherwise fall back to the plain summed-score vote (``base``).
+    different call is informative), and (c) its summed score is at least
+    ``min_score_ratio`` of the score-vote winner's -- uncontestable is not the
+    same as well supported. If exactly one superfamily qualifies, it wins;
+    otherwise fall back to the plain summed-score vote (``base``).
     """
     if not unknown_competes:
         named = [e for e in pool
@@ -883,9 +909,16 @@ def _scope_aware_superfamily(pool, weighted_winner, scope,
     if len(sfs) == 1:
         return base
 
+    totals = defaultdict(float)
+    for _db, r, h in pool:
+        totals[h["superfamily"]] += r["score"]
+    floor = min_score_ratio * totals[base]
+
     qualifiers = set()
     for db, _r, h in pool:
         s = h["superfamily"]
+        if totals[s] < floor:
+            continue
         others = {e[0] for e in pool if e[0] != db}
         contestable = any(resolves(od, s, scope) for od in others)
         if contestable:
@@ -898,7 +931,8 @@ def _scope_aware_superfamily(pool, weighted_winner, scope,
 
 
 def reconcile_classifications(per_db_results, harmonization=None, scope=None,
-                              unknown_competes=False):
+                              unknown_competes=False, tiers=None,
+                              scope_min_ratio=SCOPE_MIN_SCORE_RATIO):
     """Reconcile per-database classifications via hierarchical weighted vote.
 
     For each sequence classified by multiple databases, vote at each taxonomic
@@ -935,6 +969,11 @@ def reconcile_classifications(per_db_results, harmonization=None, scope=None,
             defaults to clade_harmonize.load_harmonization().
         scope: optional pre-loaded scope mask (for testing); defaults to
             clade_harmonize.load_scope().
+        tiers: optional {db_name: tier}, lower is stronger (missing = 0).
+            Only the strongest tier that called a sequence votes on it; a
+            weaker tier's call decides only when nothing above it called.
+            Every call still appears in ``secondary``. None = all vote.
+        scope_min_ratio: see _scope_aware_superfamily's min_score_ratio.
 
     Returns:
         list of dicts — one per sequence — with the primary result's fields
@@ -962,12 +1001,16 @@ def reconcile_classifications(per_db_results, harmonization=None, scope=None,
 
     reconciled = []
     for seq_id, entries in by_seq.items():
-        multi_db = len({db for db, _ in entries}) >= 2
+        voters = entries
+        if tiers:
+            top = min(tiers.get(db, 0) for db, _ in entries)
+            voters = [e for e in entries if tiers.get(e[0], 0) == top]
+        multi_db = len({db for db, _ in voters}) >= 2
 
         # Harmonize labels only when >= 2 databases weigh in; otherwise keep
         # native labels so single-database output is byte-identical to before.
         annotated = []
-        for db, r in entries:
+        for db, r in voters:
             if multi_db:
                 o_h, sf_h, c_h = harmonize(
                     db, r["order"], r["superfamily"], r["clade"], harmonization)
@@ -983,7 +1026,8 @@ def reconcile_classifications(per_db_results, harmonization=None, scope=None,
         for level in ("order", "superfamily", "clade"):
             if level == "superfamily" and multi_db:
                 winner = _scope_aware_superfamily(pool, weighted_winner, scope,
-                                                unknown_competes=unknown_competes)
+                                                unknown_competes=unknown_competes,
+                                                min_score_ratio=scope_min_ratio)
             else:
                 winner = weighted_winner(pool, level)
             pool = [e for e in pool if e[2][level] == winner]

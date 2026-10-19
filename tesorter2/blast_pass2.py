@@ -14,6 +14,7 @@ Key design:
 
 import logging
 import os
+import resource
 import subprocess
 import tempfile
 import time
@@ -291,10 +292,29 @@ def classify_from_blast(conn, classifications, database=None,
     return new_classifications
 
 
+def _cpu_s():
+    """CPU seconds of this process and its reaped children. The blastn and
+    makeblastdb processes are children (or grandchildren through the pool
+    workers, which wait on them), so they land in RUSAGE_CHILDREN once the
+    pool has been joined."""
+    me = resource.getrusage(resource.RUSAGE_SELF)
+    kids = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return me.ru_utime + me.ru_stime + kids.ru_utime + kids.ru_stime
+
+
+def _stage_row(timing, name, t0, c0, cores):
+    """Log one sub-step's wall and CPU, and append it to `timing` if given."""
+    wall, cpu = time.time() - t0, _cpu_s() - c0
+    log.info("  %s: %.1fs wall, %.1fs cpu over %d core(s) (%.0f%% utilised)",
+             name, wall, cpu, cores, 100 * cpu / (wall * cores) if wall else 0)
+    if timing is not None:
+        timing.append((name, wall, cpu, cores))
+
+
 def blast_pass2(input_fasta, conn, hmm_classifications=None,
                 seq_type="nucl", n_processors=4,
                 min_identity=80, min_coverage=80, min_length=80,
-                outdir=None):
+                outdir=None, timing=None):
     """Full BLAST pass-2 pipeline.
 
     Args:
@@ -337,7 +357,9 @@ def blast_pass2(input_fasta, conn, hmm_classifications=None,
         return []
 
     # Build BLAST database
+    tm, cm = time.time(), _cpu_s()
     make_blast_db(db_fasta, seq_type=seq_type)
+    _stage_row(timing, "blast_makeblastdb", tm, cm, 1)
 
     # Run parallel BLAST
     log.info(f"  Running {len(query_chunks)} BLAST processes")
@@ -351,11 +373,13 @@ def blast_pass2(input_fasta, conn, hmm_classifications=None,
         blast_outputs.append(out)
         args_list.append((chunk, db_fasta, out, seq_type, 1))
 
+    c1 = _cpu_s()
     with multiprocessing.Pool(n_processors) as pool:
         pool.starmap(run_blast_chunk, args_list)
 
     t2 = time.time()
     log.info(f"  BLAST search: {t2 - t1:.1f}s")
+    _stage_row(timing, "blast_search", t1, c1, n_processors)
 
     # Parse and store
     all_hits = []

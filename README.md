@@ -97,7 +97,7 @@ MMseqs2 18.8cc5c.
 ## Two modes
 
 The mode is a verb, because what the input *is* decides nearly everything downstream — which
-engines can run, whether the input is windowed, whether there is a per-element classification at
+engines can run, whether there is a per-element classification at
 all:
 
 ```bash
@@ -124,7 +124,7 @@ the pyHMMER genome path was removed rather than kept as a slower, less sensitive
 ### Default mode (pyHMMER)
  
 Single-pass `--nobias` search against all models via pyHMMER, in-process: `hmmsearch` for
-amino-acid databases, `nhmmer` for DNA databases (`sine`, `sine-so`).
+amino-acid databases, `nhmmer` for DNA databases (`sine`, `sine-animals`, Dfam).
  
 - Model-cost-aware parallel load balancing chooses between pyHMMER's `queries` and `targets`
   parallelization per model bin, reaching near-full CPU utilization (see
@@ -189,27 +189,26 @@ emits a domain-level GFF3 plus a summary table. It does not produce a per-elemen
 does not run BLAST pass-2, matching TEsorter's `-genome` behaviour.
  
 Protein domains are found with **BATH only**. `bathsearch --fs` runs directly on the nucleotide
-windows; the tblout already reports nucleotide coordinates and strand, so no six-frame translation
+chromosomes; the tblout already reports nucleotide coordinates and strand, so no six-frame translation
 or coordinate back-mapping happens at all. BATH additionally streams long targets in ~0.25 Mb
 blocks overlapped by the maximum expected hit length, reconciling boundary duplicates internally.
 `--bath` is therefore implied and has no effect here.
 
-DNA databases (`sine`) are searched with nhmmer against the **raw, un-windowed** input, so
-non-coding elements are annotated independently of the protein path's window sizing. A DNA-only run
-is supported and needs no BATH; windowing is skipped entirely and no `cut.fa` is written.
+DNA databases (`sine`) are searched with nhmmer, which streams long targets the same way. Neither
+engine needs the genome windowed, so it is searched as given. A DNA-only run is supported and needs
+no BATH.
 
 Overlaps are resolved within each feature type, so a BATH protein-domain feature (`CDS`) and an
 nhmmer element feature (e.g. `SINE_element`) at the same locus coexist as independent layers rather
 than evicting one another.
 
-Window size: `--win-size` (default `1e6`), `--win-ovl` (default `1e5`).
 Requires at least one database.
  
 ### Multiple databases
  
 **Most bundled databases are searched by default.** Omitting `-d` searches rexdb, gydb, line, tir,
 sine, sine-animals, pfam-te and dfam-core; pass `-d rexdb,gydb` to restrict the set, or
-`--max-search` to force every alias including the ones that are off by default (`sine-so` and the
+`--max-search` to force every alias including the ones that are off by default (the
 deeper Dfam collections). Each primary database classifies independently and reconciliation resolves
 them afterwards, so more databases means more evidence rather than more ambiguity — at
 proportionally more compute.
@@ -332,15 +331,13 @@ tesorter2 <sequence> [options]
 | `-p`, `--processors` | `4` | Processors |
 | `--no-partition` | partitioning **on** | `sequences` mode only. Searches the input as one unit instead of one balanced group per processor. Partitioning is the default and is 4.6x faster on 135k sequences over 64 cores |
 | `--memory-db` | off | `sequences` mode only. Build the results database in RAM and copy it out once at the end |
-| `--partition-queue` | off | `sequences` mode only. Schedule (chunk x database) tasks from one queue per cascade level. Measured slower than the default |
+| `-nocln`, `--no-cleanup` | cleanup **on** | `sequences` mode only. Keep intermediates (partition FASTAs and databases, translations, cascade handoffs, BLAST pass-2 scratch) under `primary/`, `subordinate/` and `blast_pass2/`. A failed run always keeps them |
+| `--emit-timing` | off | `sequences` mode only. Write `cascade_timing.tsv`, per-stage wall and CPU time. Diagnostic |
 | `--bath` | off | Frameshift-aware BATH engine (AA databases only; implied by `--genome`) |
 | `--stages` | off | Staged multi-engine cascade over AA databases, e.g. `nail,hmmer,bath` |
 | `--mask-stops` | off | Translate stop codons as `X` instead of `*`, letting profiles align through premature stops |
 | `--genome` | off | Genome mode: domain-level annotation + GFF3 (BATH required) |
-| `--win-size` | `1e6` | Genome mode window size |
-| `--win-ovl` | `1e5` | Genome mode window overlap |
 | `--emit-bath` | off | Emit routed FASTA partitions for BATH to `{outdir}/BATHwater/` |
-| `--include-sine-so` | off | Include the SINE_SO model in AnnoSINE searches |
 | `--compat-tesorter-voting` | off | Raw domain-count clade vote (TEsorter behaviour) |
 | `--compat-tesorter-rounding` | off | Round normalized scores to 2 dp before filtering (replicates a TEsorter bug) |
 | `--compat-tesorter-output` | off | Emit combined `.cls.tsv` in TEsorter's 7-column format |
@@ -352,14 +349,14 @@ tesorter2 <sequence> [options]
 | File | Description |
 |---|---|
 | `{prefix}.db` | SQLite database with all hits, classifications and BLAST results |
-| `{prefix}.aa` | Six-frame translated amino-acid sequences (indexed; HMMER path only) |
 | `{prefix}.{db}.cls.tsv` | Per-database classifications (order, superfamily, clade, completeness) |
+| `{prefix}.{db}.cls.lib` | Per-database RepeatMasker library |
 | `{prefix}.cls.tsv` | Combined classifications across databases + BLAST pass-2 (+ `SecondaryHits`, `SO_name`, `SO_ID`) |
+| `cascade_timing.tsv` | With `--emit-timing`: per-stage search cost, one row per round (`primary`/`subordinate`), partition group, database and stage |
 | `{prefix}.dom.gff3` | Genome mode: classified TE protein-domain features |
 | `{prefix}.dom.fna` | Genome mode: nucleotide sequences of each classified feature |
 | `{prefix}.genome.summary.tsv` | Genome mode: Order/Superfamily/Clade tallies |
-| `blast_pass2/` | BLAST database and query chunks (temporary) |
-| `cut.fa` | Genome mode: windowed genome, written only when a protein database is searched (temporary) |
+| `primary/`, `subordinate/`, `blast_pass2/` | Intermediates, deleted at the end of a successful `sequences` run unless `--no-cleanup` |
  
 ---
  
@@ -402,14 +399,14 @@ that motivated the decision.
 | File | Description |
 |---|---|
 | `{prefix}.db` | SQLite database with all hits, classifications and BLAST results |
-| `{prefix}.aa` | Six-frame translated amino-acid sequences (indexed; HMMER path only) |
 | `{prefix}.{db}.cls.tsv` | Per-database classifications (order, superfamily, clade, completeness) |
+| `{prefix}.{db}.cls.lib` | Per-database RepeatMasker library |
 | `{prefix}.cls.tsv` | Combined classifications across databases + BLAST pass-2 (+ `SecondaryHits`, `SO_name`, `SO_ID`) |
+| `cascade_timing.tsv` | With `--emit-timing`: per-stage search cost, one row per round (`primary`/`subordinate`), partition group, database and stage |
 | `{prefix}.dom.gff3` | Genome mode: classified TE protein-domain features |
 | `{prefix}.dom.fna` | Genome mode: nucleotide sequences of each classified feature |
 | `{prefix}.genome.summary.tsv` | Genome mode: Order/Superfamily/Clade tallies |
-| `blast_pass2/` | BLAST database and query chunks (temporary) |
-| `cut.fa` | Genome mode: windowed genome, written only when a protein database is searched (temporary) |
+| `primary/`, `subordinate/`, `blast_pass2/` | Intermediates, deleted at the end of a successful `sequences` run unless `--no-cleanup` |
  
 ---
  
@@ -442,7 +439,7 @@ Supported: `-db/--hmm-database`, `--db-hmm`, `-st/--seq-type`, `-pre/--prefix`, 
 - **`sequence.py`** — FASTA ingestion (pyfastx) and six-frame translation (pyhmmer)
 - **`hmm.py`** — HMM loading, alphabet detection, optimized profile construction
 - **`bath_search.py`** — BATH engine: conversion, `bathsearch --fs` invocation, hit normalization
-- **`genome.py`** — Genome mode: windowing, per-domain classification, overlap resolution, GFF3/summary
+- **`genome.py`** — Genome mode: whole-chromosome search, per-domain classification, overlap resolution, GFF3/summary
 - **`results.py`** — SQLite persistence with pre-parsed columns (base_seq, strand, frame, domain_type)
 - **`deconflict.py`** — numpy-based hit deconfliction and parameterized filtering
 ### Classification and post-processing
@@ -462,10 +459,8 @@ thread takes one HMM and searches it against all sequences, and `targets`, where
 searched against models in parallel. `queries` is inherently more efficient unless there are few
 models.
  
-HMM runtime scales roughly with *M²*, so a single long model can dominate. AnnoSINE is the
-pathological case: `SINE_SO` (M≈4,100) accounts for ~71% of the model set's runtime, and under
-`queries` parallelism every other model finishes quickly while `SINE_SO` runs single-threaded for
->10× longer than all the rest combined.
+HMM runtime scales roughly with *M²*, so a single long model can dominate: under `queries`
+parallelism every other model finishes quickly while the long one runs single-threaded.
  
 TEsorter2 precomputes each model's expected cost (*M²*) and bins them: **small** models
 (cost ≤ 75th percentile + 2×IQR for that database) run in `queries` mode; **large** models run in

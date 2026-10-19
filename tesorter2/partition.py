@@ -58,9 +58,10 @@ workers.
 
 import heapq
 import logging
-import multiprocessing
 import os
 import sqlite3
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 
 import pyfastx
 
@@ -243,15 +244,39 @@ def merge_one(conn, path):
     return n_rows
 
 
+def _append_timing(src, dest, group):
+    """Copy one group's cascade_timing.tsv into the round's, tagged by group.
+
+    The per-stage table is the only thing in a group's work directory worth
+    keeping, and it has to be lifted out before the directory is deleted.
+    """
+    if not os.path.exists(src):
+        return
+    with open(src) as fh:
+        header = fh.readline()
+        rows = fh.readlines()
+    new = not os.path.exists(dest)
+    with open(dest, "a") as out:
+        if new:
+            out.write("group\t" + header)
+        out.writelines("%d\t%s" % (group, r) for r in rows if r.strip())
+
+
 def run_partitioned(conn, input_fasta, db_paths, db_alphabets, outdir,
                     n_groups, n_workers, cascade_kwargs, seq_index=None,
-                    lengths=None):
+                    lengths=None, cleanup=True, timing=False):
     """Search the input in `n_groups` independent groups. Returns per_db.
 
     `seq_index` maps a sequence name to its position in the original input and
     is written to each hit's `id`. It is the same map for every worker: the
     position is a property of the input, not of the group a sequence landed in,
     so nothing has to be reserved, strided or renumbered.
+
+    With `cleanup`, a group's FASTA and work directory -- its own results
+    database, translations, handoffs and engine output -- are deleted as soon
+    as it is merged, so the run never holds a second copy of every hit on disk.
+    With `timing`, each group's stage timing is first appended to
+    `outdir/cascade_timing.tsv`.
     """
     groups, sizes, total_residues = plan_groups(input_fasta, n_groups,
                                                 lengths=lengths)
@@ -281,13 +306,70 @@ def run_partitioned(conn, input_fasta, db_paths, db_alphabets, outdir,
     # every merge behind it, and there is no reason to: `id` is the input
     # ordinal rather than the rowid, so a row's value no longer decides where
     # it lands and appends are appends whatever order groups finish in.
-    with multiprocessing.Pool(min(n_groups, n_workers)) as pool:
-        for idx, part, db_path in pool.imap_unordered(_worker, jobs):
+    timing_tsv = os.path.join(outdir, "cascade_timing.tsv")
+    if os.path.exists(timing_tsv):
+        os.remove(timing_tsv)          # appended to below; never mix runs
+
+    # ProcessPoolExecutor, not multiprocessing.Pool: when a worker is killed
+    # outright -- the OOM killer, SIGKILL -- Pool quietly replaces the process
+    # and waits forever for a result that will never come. The --max-search
+    # stack run lost three workers to OOM, merged its last group at 11:30, and
+    # sat until its 6-hour limit cancelled it at 17:06. The executor marks
+    # itself broken instead, and the run fails when the worker dies.
+    ex = ProcessPoolExecutor(min(n_groups, n_workers))
+    try:
+        futures = [ex.submit(_worker, job) for job in jobs]
+        for fut in as_completed(futures):
+            try:
+                idx, part, db_path = fut.result()
+            except BrokenProcessPool as e:
+                raise RuntimeError(
+                    "A partition worker died without reporting back, most "
+                    "likely killed by the OOM killer. Every worker loads the "
+                    "databases and searches its group at once, so peak memory "
+                    "is roughly per-worker peak x %d. Rerun with fewer "
+                    "processors or --no-partition."
+                    % min(n_groups, n_workers)) from e
             for name, results in part.items():
                 per_db.setdefault(name, []).extend(results)
             merged += merge_one(conn, db_path)
+            work = os.path.dirname(db_path)
+            if timing:
+                _append_timing(os.path.join(work, "cascade_timing.tsv"),
+                               timing_tsv, idx)
+            if cleanup:
+                remove_path(work)
+                remove_path(paths[idx])
             log.info("  group %d done (%s), merged",
                      idx, ", ".join("%s=%d" % (k, len(v))
                                     for k, v in part.items()) or "nothing")
+    except BaseException:
+        # shutdown(wait=True) -- what `with` does -- would sit behind every
+        # group still searching, which is hours, before the error surfaced.
+        # The executor has no public terminate, so reach for its processes.
+        ex.shutdown(wait=False, cancel_futures=True)
+        for proc in list((getattr(ex, "_processes", None) or {}).values()):
+            proc.terminate()
+        raise
+    ex.shutdown()
     log.info("  Merged %d rows from %d partition databases", merged, n_groups)
+    if cleanup:
+        remove_path(part_dir)
     return per_db
+
+
+def remove_path(path):
+    """Delete a file or directory tree; warn rather than fail.
+
+    Cleanup runs after the results are safely written, so a file a parallel
+    filesystem still holds open (NFS leaves `.nfsXXXX` placeholders) must not
+    turn a finished run into a failed one.
+    """
+    import shutil
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            os.remove(path)
+    except OSError as e:
+        log.warning("Could not remove intermediate %s: %s", path, e)

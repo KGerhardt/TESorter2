@@ -184,7 +184,13 @@ def create_db(db_path):
     prior finalize_db are dropped here and rebuilt at the end of this
     run by finalize_db.
     """
-    conn = sqlite3.connect(db_path)
+    return prepare_db(sqlite3.connect(db_path))
+
+
+def prepare_db(conn):
+    """create_db's work on a connection already open: bulk-insert tuning, the
+    schema, and the deferred indexes dropped. Separate so a database copied
+    into memory (`--extend --memory-db`) gets the same treatment."""
     # WAL trades a tiny durability window (losing only the last transaction
     # on a power cut) for much faster concurrent writes and amortized fsync.
     # synchronous=NORMAL skips the inner fsync between WAL writes and
