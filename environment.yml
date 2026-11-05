@@ -8,21 +8,18 @@ dependencies:
   # external binaries required at runtime
   - hmmer            # provides nhmmer (DNA databases) and hmmsearch
   - blast            # BLAST+ for pass-2 verification
+  - minimap2         # optional pass-2 aligner (--pass2-aligner minimap2)
+  - nail             # first stage of the default cascade
+  - mmseqs2          # nail shells out to it for seeding
   # python deps (also declared in pyproject.toml)
   - pyhmmer>=0.10
   - pyfastx
   - numpy
   - pip:
       - -e .
-# NOTE: nail (the optional first cascade stage) is a Rust binary from
-# crates.io: `cargo install nail`. It also needs MMseqs2, which it shells out
-# to for seeding -- add `mmseqs2` to the dependencies above if you want it, or
-# install separately. Only required when a --stages list includes nail.
-#
-# NOTE: BATH (bathsearch/bathconvert) is not on bioconda and publishes no
-# release binaries, so it must be built from source. Required for --genome
-# runs against a protein database (genome mode has no other protein engine)
-# and for --bath; a DNA-only genome run does not need it. See the README's
-# BATH section for the build recipe, then put BATH/src on PATH or set
-# BATH_BIN_DIR.
+# NOTE: BATH (bathsearch/bathconvert), the last stage of the default cascade
+# and the only protein engine of genome mode, is not on conda. Download a
+# prebuilt release from https://github.com/TravisWheelerLab/BATH/releases or
+# build it from source (see the README), then put it on PATH or set
+# BATH_BIN_DIR. Without it, `tesorter2 sequences` skips the BATH stage.
 # The HMM databases ship inside the package: no download step is needed.
