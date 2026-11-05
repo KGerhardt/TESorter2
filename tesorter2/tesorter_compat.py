@@ -16,6 +16,8 @@ import logging
 import os
 import sys
 
+from . import __version__
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -45,6 +47,8 @@ def parse_args():
                     "Lineage-level classification of transposable elements "
                     "using conserved protein domains.",
     )
+    parser.add_argument("--version", action="version",
+                        version="TEsorter " + __version__ + " (TEsorter2)")
     parser.add_argument("sequence", type=str,
                         help="Input TE/LTR sequences in FASTA format [required]")
     parser.add_argument("-db", "--hmm-database", type=str, default="rexdb",

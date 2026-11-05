@@ -7,7 +7,7 @@ dependencies:
   - pip
   # external binaries required at runtime
   - hmmer            # provides nhmmer (DNA databases) and hmmsearch
-  - blast            # BLAST+ for pass-2 verification
+  - rmblast          # BLAST+ (blastn, blastp, makeblastdb) for pass-2; same binaries as blast, coexists with RepeatMasker
   - minimap2         # optional pass-2 aligner (--pass2-aligner minimap2)
   - nail             # first stage of the default cascade
   - mmseqs2          # nail shells out to it for seeding

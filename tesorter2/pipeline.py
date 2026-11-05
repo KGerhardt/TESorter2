@@ -16,6 +16,7 @@ import os
 import sys
 import time
 
+from . import __version__
 from .paths import get_db_dir
 from .hmm import peek_alphabet, AMINO_ALPHABET, DNA_ALPHABET
 from .sequence import open_input, looks_nucleotide
@@ -155,6 +156,8 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="tesorter2",
         description="Fast TE classification using HMM profile databases.")
+    parser.add_argument("--version", action="version",
+                        version="TEsorter2 " + __version__)
     sub = parser.add_subparsers(dest="mode", metavar="{sequences,genome}")
 
     # ---- tesorter2 sequences ----

@@ -32,13 +32,13 @@ and its command line, and adds:
 conda install -c conda-forge -c bioconda tesorter
 ```
 
-This installs TEsorter2 with HMMER, BLAST+, minimap2, nail and MMseqs2, and provides both the
-`tesorter2` and the `TEsorter` commands. The HMM databases are bundled: there is nothing to
-download. BATH is not on conda yet; see below.
+This installs TEsorter2 with every search engine (HMMER, nail with MMseqs2, BATH) plus BLAST+
+and minimap2, and provides both the `tesorter2` and the `TEsorter` commands. The HMM databases are
+bundled: there is nothing to download.
 
-### Container (includes BATH)
+### Container
 
-A Docker / Apptainer image with every engine, BATH included, is described in
+A Docker / Apptainer image with every engine is described in
 [`container/README.md`](container/README.md):
 
 ```bash
@@ -57,10 +57,10 @@ conda activate tesorter2
 
 or, with HMMER and BLAST+ already on `PATH`, `pip install git+https://github.com/KGerhardt/TEsorter2.git`.
 
-### Adding BATH (optional for `sequences`, required for `genome`)
+### BATH outside conda
 
-Without BATH, `tesorter2 sequences` simply skips the BATH stage and says so in the log. To enable
-it, download a prebuilt release from the [BATH releases page](https://github.com/TravisWheelerLab/BATH/releases)
+With a pip or source install, BATH has to be added by hand (it is optional for `sequences`, which
+skips the BATH stage with a warning, and required for `genome`). Download a prebuilt release from the [BATH releases page](https://github.com/TravisWheelerLab/BATH/releases)
 or build it from source:
 
 ```bash
