@@ -90,16 +90,54 @@ def _bin():
         raise FileNotFoundError("NAIL_BIN is set to %r, which is not a file."
                                 % explicit)
 
-    found = shutil.which("nail")
-    if found:
-        return found
+    # Every `nail` on PATH, in order, then cargo's. The first hit is not
+    # trusted: RHEL-family systems ship /usr/bin/nail as a link to mailx, and
+    # running the mail client as a search engine hangs or sends mail.
+    candidates = []
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        c = os.path.join(d or ".", "nail")
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            candidates.append(c)
+    candidates.append(os.path.join(os.path.expanduser("~"), ".cargo", "bin",
+                                   "nail"))
+    rejected = []
+    for c in candidates:
+        if not os.path.isfile(c):
+            continue
+        if _is_nail_engine(c):
+            return c
+        rejected.append(c)
 
-    cargo = os.path.join(os.path.expanduser("~"), ".cargo", "bin", "nail")
-    if os.path.isfile(cargo):
-        return cargo
+    raise FileNotFoundError(
+        "nail binary not found on PATH%s -- %s." % (
+            " (ignored %s: not the nail search engine, likely the mailx mail "
+            "client)" % ", ".join(rejected) if rejected else "",
+            _INSTALL_HELP))
 
-    raise FileNotFoundError("nail binary not found on PATH -- %s."
-                            % _INSTALL_HELP)
+
+_MAIL_CLIENTS = {"mailx", "mail", "s-nail", "heirloom-mailx", "bsd-mailx"}
+_ENGINE_CHECKED = {}
+
+
+def _is_nail_engine(path):
+    """True if `path` is TravisWheelerLab's nail, not a mail client.
+
+    Links to a known mail client are rejected without running them. Anything
+    else must answer `--version` with "nail <version>" (clap's format),
+    with stdin closed so a mail client can never wait for a message body.
+    """
+    if path in _ENGINE_CHECKED:
+        return _ENGINE_CHECKED[path]
+    ok = False
+    if os.path.basename(os.path.realpath(path)) not in _MAIL_CLIENTS:
+        try:
+            out = subprocess.run([path, "--version"], stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, timeout=10)
+            ok = out.returncode == 0 and out.stdout.strip().startswith("nail ")
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+    _ENGINE_CHECKED[path] = ok
+    return ok
 
 
 def require_binaries():
