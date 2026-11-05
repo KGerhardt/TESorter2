@@ -225,7 +225,7 @@ def parse_args(argv=None):
              "(BATH), and DNA profile databases are skipped since nothing can "
              "search them. [default: nucl]")
     seq.add_argument(
-        "--stages", default=",".join(DEFAULT_STAGES),
+        "--stages", default=None,
         help="Ordered, comma-separated engine cascade for amino-acid "
              f"databases ({', '.join(sorted(k for k in ENGINES if k != 'nhmmer'))}). "
              "Each stage searches only what earlier stages left unresolved, "
@@ -233,7 +233,10 @@ def parse_args(argv=None):
              "sensitive ones see a shrinking remainder. One name runs that "
              "engine alone -- this is the only way to choose an engine. DNA "
              "databases always use nhmmer, the only engine that reads DNA "
-             f"profiles. [default: {','.join(DEFAULT_STAGES)}]")
+             f"profiles. [default: {','.join(DEFAULT_STAGES)}; when --stages "
+             "is not given, a stage whose engine is not installed (BATH is "
+             "not on conda) is skipped with a warning. An explicit --stages "
+             "list fails instead.]")
     seq.add_argument("--compat-tesorter-voting", action="store_true",
                      default=False,
                      help="Decide the clade by raw domain-count plurality, "
@@ -322,6 +325,38 @@ def parse_args(argv=None):
     if args.mode is None:
         parser.error("a mode is required: %s" % " | ".join(MODES))
     return args
+
+
+def _resolve_stages(stages_arg):
+    """The protein-stage list for this run.
+
+    An explicit --stages is taken as given: a missing engine there is a
+    configuration error and fails in the cascade's own binary check. The
+    default cascade instead drops any stage whose external engine is not
+    installed, with a warning, so a plain conda install (which cannot ship
+    BATH) still runs. hmmer is pyhmmer and always available.
+    """
+    if stages_arg is not None:
+        return [x.strip() for x in stages_arg.split(",") if x.strip()]
+
+    from . import bath_search, nail_search
+    checks = {"bath": bath_search.require_binaries,
+              "nail": nail_search.require_binaries}
+    kept = []
+    for name in DEFAULT_STAGES:
+        check = checks.get(name)
+        if check is not None:
+            try:
+                check()
+            except SystemExit:
+                log.warning("Default cascade: skipping the %s stage, %s is "
+                            "not installed (see the README). Pass --stages "
+                            "to choose engines explicitly.", name,
+                            {"bath": "BATH", "nail": "nail/MMseqs2"}[name])
+                continue
+        kept.append(name)
+    log.info("Protein cascade stages: %s", ",".join(kept))
+    return kept
 
 
 def _normalize_argv(argv):
@@ -588,7 +623,7 @@ def main():
         n_groups = len(nucl_lengths)
 
     cascade_kwargs = dict(
-        protein_stages=[x.strip() for x in args.stages.split(",")],
+        protein_stages=_resolve_stages(args.stages),
         compat_rounding=args.compat_tesorter_rounding,
         compat_voting=args.compat_tesorter_voting,
         mask_stops=args.mask_stops,

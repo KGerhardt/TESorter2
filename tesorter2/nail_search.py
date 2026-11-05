@@ -56,7 +56,8 @@ import subprocess
 log = logging.getLogger(__name__)
 
 _INSTALL_HELP = (
-    "install it with 'cargo install nail' (and ensure MMseqs2 is on PATH, "
+    "install it with 'conda install -c bioconda nail mmseqs2' or 'cargo "
+    "install nail' (and ensure MMseqs2 is on PATH, "
     "which nail shells out to for seeding), then put it on PATH or set "
     "NAIL_BIN")
 

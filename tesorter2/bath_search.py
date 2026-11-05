@@ -26,26 +26,24 @@ import tempfile
 
 log = logging.getLogger(__name__)
 
-# BATH publishes no release artifacts (the repo has tags but zero releases), so
-# a source build is the only install route.
+# BATH is not on conda. Releases from v2.0.0-rc5 ship prebuilt binaries
+# (https://github.com/TravisWheelerLab/BATH/releases); otherwise build from
+# source.
 _BUILD_HELP = (
-    "build it with:\n"
+    "download a prebuilt release from "
+    "https://github.com/TravisWheelerLab/BATH/releases, or build it with:\n"
     "  git clone https://github.com/TravisWheelerLab/BATH.git\n"
     "  cd BATH && git clone -b BATH https://github.com/TravisWheelerLab/easel\n"
     "  autoconf && ./configure && make\n"
     "then add BATH/src to PATH or set BATH_BIN_DIR to it")
 
-# Fallback for the original development environment. Only consulted when
-# BATH_BIN_DIR is unset and the binary is not on PATH.
-_LEGACY_BATH_BIN_DIR = "/anvil/projects/x-bio250374/daniel/software/BATH_2/BATH/src"
 
 
 def _bin(name):
     """Absolute path to a BATH binary.
 
     Resolution order: BATH_BIN_DIR (an explicit setting always wins, and fails
-    loudly rather than silently falling through), then PATH, then the legacy
-    development directory.
+    loudly rather than silently falling through), then PATH.
     """
     bin_dir = os.environ.get("BATH_BIN_DIR")
     if bin_dir:
@@ -59,13 +57,9 @@ def _bin(name):
     if found:
         return found
 
-    path = os.path.join(_LEGACY_BATH_BIN_DIR, name)
-    if os.path.isfile(path):
-        return path
-
     raise FileNotFoundError(
         f"BATH binary '{name}' not found on PATH. BATH is not packaged on "
-        f"conda and ships no prebuilt binaries -- {_BUILD_HELP}.")
+        f"conda -- {_BUILD_HELP}.")
 
 
 def require_binaries():
@@ -94,7 +88,25 @@ def require_binaries():
 # self-contained and always derives from the database actually being used.
 
 
-def _cache_path(hmm_path):
+_FS_SUPPORT = None
+
+
+def _bathconvert_fs():
+    """Whether this bathconvert has --fs (v2.0.0-rc7 and later).
+
+    From rc7, `bathsearch --fs` refuses a profile without frameshift
+    statistics, and only `bathconvert --fs` writes them. rc4 and earlier have
+    no such option and need none. Probed once from the help text.
+    """
+    global _FS_SUPPORT
+    if _FS_SUPPORT is None:
+        out = subprocess.run([_bin("bathconvert"), "-h"],
+                             capture_output=True, text=True)
+        _FS_SUPPORT = "--fs" in (out.stdout + out.stderr)
+    return _FS_SUPPORT
+
+
+def _cache_path(hmm_path, suffix=".bath.hmm"):
     """Where the converted BATH HMM for hmm_path should live.
 
     Beside the source HMM when that directory is writable, which keeps the
@@ -108,14 +120,14 @@ def _cache_path(hmm_path):
     """
     directory = os.path.dirname(hmm_path) or "."
     if os.access(directory, os.W_OK):
-        return hmm_path + ".bath.hmm"
+        return hmm_path + suffix
 
     root = os.environ.get("TESORTER2_CACHE") or os.path.join(
         os.path.expanduser("~"), ".cache", "tesorter2", "bath")
     os.makedirs(root, exist_ok=True)
     st = os.stat(hmm_path)
-    return os.path.join(root, "%s.%d.%d.bath.hmm" % (
-        os.path.basename(hmm_path), st.st_size, int(st.st_mtime)))
+    return os.path.join(root, "%s.%d.%d%s" % (
+        os.path.basename(hmm_path), st.st_size, int(st.st_mtime), suffix))
 
 
 def resolve_bath_db(hmm_path, db_name=None):
@@ -126,7 +138,11 @@ def resolve_bath_db(hmm_path, db_name=None):
          directory is writable, else under a user cache dir) — reuse if present.
       2. Run bathconvert on hmm_path, writing the cache, and use that.
     """
-    cache = _cache_path(hmm_path)
+    # A conversion with frameshift statistics gets its own cache name, so a
+    # cache written by an older BATH (no FS stats) is never handed to a newer
+    # bathsearch --fs, which would reject it.
+    fs = _bathconvert_fs()
+    cache = _cache_path(hmm_path, ".bath.fs.hmm" if fs else ".bath.hmm")
     if os.path.isfile(cache):
         log.info(f"  BATH HMM (cached): {cache}")
         return cache
@@ -137,7 +153,8 @@ def resolve_bath_db(hmm_path, db_name=None):
     fd, tmp = tempfile.mkstemp(suffix=".bath.hmm", dir=os.path.dirname(cache) or ".")
     os.close(fd)
     try:
-        subprocess.run([_bin("bathconvert"), tmp, hmm_path], check=True)
+        subprocess.run([_bin("bathconvert")] + (["--fs"] if fs else [])
+                       + [tmp, hmm_path], check=True)
         shutil.move(tmp, cache)
     finally:
         if os.path.exists(tmp):
