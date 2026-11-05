@@ -285,6 +285,9 @@ def main():
         scratch = os.path.join(args.tmp_dir or os.path.dirname(prefix) or ".",
                                "blast_pass2")
         shutil.rmtree(scratch, ignore_errors=True)
+        for f in (f"{prefix}.aa", f"{prefix}.aa.fxi"):
+            if os.path.exists(f):
+                os.remove(f)
 
     t_end = time.time()
     log.info(f"Done in {t_end - t_start:.1f}s")
