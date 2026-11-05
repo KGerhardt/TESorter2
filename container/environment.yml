@@ -1,0 +1,19 @@
+# Runtime environment for the TEsorter2 container. Pinned to the versions
+# TEsorter2 v2.0.0 was tested with. BATH is not on conda; the Dockerfile
+# builds it from source.
+name: base
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip
+  - pyhmmer=0.12.3
+  - pyfastx=2.3.1
+  - numpy=2.4
+  - hmmer=3.4          # nhmmer for DNA databases
+  - blast=2.17.0       # pass-2 (default aligner)
+  - minimap2=2.31      # pass-2 (--pass2-aligner minimap2)
+  - nail=0.7.1         # cascade stage
+  - mmseqs2=17.b804f   # nail seeding
+  - procps-ng          # `ps`, used by Nextflow/Snakemake wrappers

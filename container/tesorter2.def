@@ -1,0 +1,19 @@
+# Apptainer image built from the Docker image (see container/README.md).
+#   apptainer build tesorter2_2.0.0.sif container/tesorter2.def
+Bootstrap: docker-daemon
+From: tesorter2:2.0.0
+
+%environment
+    export PATH=/opt/conda/bin:/opt/bath/bin:$PATH
+    export BATH_BIN_DIR=/opt/bath/bin
+
+%runscript
+    exec "$@"
+
+%test
+    tesorter2 --help > /dev/null
+    TEsorter --help > /dev/null
+    bathsearch -h > /dev/null
+    nail --help > /dev/null
+    nhmmer -h > /dev/null
+    blastn -version
