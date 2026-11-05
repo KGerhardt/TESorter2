@@ -134,15 +134,23 @@ def resolve_bath_db(hmm_path, db_name=None):
     """Return a path to a BATH-format HMM for the given repo HMMER3 database.
 
     Resolution order:
-      1. Cached conversion (see _cache_path: beside the source HMM when that
-         directory is writable, else under a user cache dir) — reuse if present.
+      1. Cached conversion, reused if present: beside the source HMM (even if
+         that directory is read-only), else the _cache_path location.
       2. Run bathconvert on hmm_path, writing the cache, and use that.
     """
     # A conversion with frameshift statistics gets its own cache name, so a
     # cache written by an older BATH (no FS stats) is never handed to a newer
     # bathsearch --fs, which would reject it.
     fs = _bathconvert_fs()
-    cache = _cache_path(hmm_path, ".bath.fs.hmm" if fs else ".bath.hmm")
+    suffix = ".bath.fs.hmm" if fs else ".bath.hmm"
+    # A conversion beside the source is used even when that directory is not
+    # writable: a container image or a shared install pre-converts there at
+    # build time and is read-only afterwards.
+    beside = hmm_path + suffix
+    if os.path.isfile(beside):
+        log.info(f"  BATH HMM (cached): {beside}")
+        return beside
+    cache = _cache_path(hmm_path, suffix)
     if os.path.isfile(cache):
         log.info(f"  BATH HMM (cached): {cache}")
         return cache
