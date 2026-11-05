@@ -622,8 +622,18 @@ def main():
                     n_groups, len(nucl_lengths), len(nucl_lengths))
         n_groups = len(nucl_lengths)
 
+    protein_stages = _resolve_stages(args.stages)
+    # Convert each protein database to BATH format once, here, before the
+    # partition workers start: otherwise every worker converts the same
+    # database at the same time (16 workers made 42 conversions of 5).
+    if "bath" in protein_stages and args.seq_type != "prot":
+        from . import bath_search
+        for name, path in db_paths.items():
+            if db_alphabets[name] == AMINO_ALPHABET:
+                bath_search.resolve_bath_db(path, db_name=name)
+
     cascade_kwargs = dict(
-        protein_stages=_resolve_stages(args.stages),
+        protein_stages=protein_stages,
         compat_rounding=args.compat_tesorter_rounding,
         compat_voting=args.compat_tesorter_voting,
         mask_stops=args.mask_stops,
