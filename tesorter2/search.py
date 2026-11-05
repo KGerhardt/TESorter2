@@ -15,6 +15,8 @@ the standard HMMER domain table text format.
 import io
 import logging
 import multiprocessing
+import os
+import re
 import statistics
 from collections import defaultdict
 
@@ -22,7 +24,7 @@ import pyfastx
 import pyhmmer
 import pyhmmer.easel as easel
 
-from .hmm import AMINO_ALPHABET
+from .hmm import AMINO_ALPHABET, DNA_ALPHABET
 
 log = logging.getLogger(__name__)
 
@@ -98,12 +100,33 @@ def build_sequence_block(aa_fasta, alphabet=None):
     if alphabet is None:
         alphabet = AMINO_ALPHABET
 
+    # Real FASTA carries whitespace inside sequence lines and stray symbols
+    # ('.', digits, '?') that easel refuses to digitize, which used to abort
+    # the whole run on one bad record. Whitespace is dropped and any other
+    # symbol outside the alphabet becomes the unknown residue (N / X).
+    is_dna = alphabet == DNA_ALPHABET
+    invalid = _INVALID_DNA_SYM if is_dna else _INVALID_AA_SYM
+    unknown = "N" if is_dna else "X"
     seqs = []
+    n_fixed = 0
     for name, seq in pyfastx.Fasta(aa_fasta, build_index=False):
-        ts = easel.TextSequence(name=name.encode("ascii"), sequence=seq)
+        clean = invalid.sub(unknown, _WHITESPACE.sub("", seq.upper()))
+        if clean != seq.upper():
+            n_fixed += 1
+        ts = easel.TextSequence(name=name.encode("ascii"), sequence=clean)
         seqs.append(ts.digitize(alphabet))
+    if n_fixed:
+        log.warning("  %d sequence(s) in %s had whitespace or symbols outside "
+                    "the %s alphabet; cleaned before searching", n_fixed,
+                    os.path.basename(aa_fasta), "DNA" if is_dna else "amino")
 
     return easel.DigitalSequenceBlock(alphabet, seqs)
+
+
+_WHITESPACE = re.compile(r"\s+")
+# easel's DNA and amino alphabets, including degeneracy, gap and stop codes.
+_INVALID_DNA_SYM = re.compile(r"[^ACGTURYMKSWHBVDN\-*~]")
+_INVALID_AA_SYM = re.compile(r"[^ACDEFGHIKLMNPQRSTVWYBJZOUX\-*~]")
 
 
 def _collect_hits(top_hits_iter):
