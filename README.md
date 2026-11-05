@@ -3,8 +3,7 @@
 Fast, divergence-robust classification of transposable elements (TEs) from their protein domains.
 
 TEsorter2 is the successor of [TEsorter](https://github.com/zhangrengang/TEsorter). It keeps
-TEsorter's classification scheme (Order / Superfamily / Clade from conserved TE protein domains)
-and its command line, and adds:
+TEsorter's classification scheme and its command line, and adds:
 
 - **Speed.** Searches run in-process through [pyHMMER](https://pyhmmer.readthedocs.io/) with
   cost-aware load balancing, and the input is split across processors. On 108k RepBase elements
@@ -16,13 +15,9 @@ and its command line, and adds:
 - **Many databases in one run, reconciled.** REXdb, GyDB, LINE, TIR, SINE, a TE-focused Pfam set
   and Dfam are bundled. Each classifies independently and a score-weighted, scope-aware vote
   reconciles them, keeping every per-database call for auditing.
-- **Reproducible calls.** The clade is chosen by a score-weighted vote instead of a raw domain count
-  whose ties depended on internal ordering.
-- **Genome mode.** Annotates TE domains along a whole assembly and writes a GFF3.
-- **Standard vocabulary.** Every call also carries its [Sequence Ontology](http://www.sequenceontology.org)
-  term.
+- **Standard vocabulary.** Every call also carries its [Sequence Ontology](http://www.sequenceontology.org) term.
 - **Drop-in replacement.** The `TEsorter` command accepts TEsorter's arguments and writes the same
-  files, so pipelines such as [EDTA](https://github.com/oushujun/EDTA) keep working unchanged.
+  files.
 
 ## Installation
 
@@ -33,8 +28,7 @@ conda install -c conda-forge -c bioconda tesorter
 ```
 
 This installs TEsorter2 with every search engine (HMMER, nail with MMseqs2, BATH) plus BLAST+
-and minimap2, and provides both the `tesorter2` and the `TEsorter` commands. The HMM databases are
-bundled: there is nothing to download.
+and minimap2. The HMM databases are bundled.
 
 ### Container
 
@@ -108,9 +102,8 @@ needs BATH for the protein databases.
 TEsorter TElib.fa -db rexdb-plant -p 16
 ```
 
-Same arguments, same output names (`TElib.fa.rexdb-plant.cls.tsv`, `.cls.lib`, `.dom.gff3`, ...)
-as TEsorter 1, with TEsorter's filters and count-based voting. On a rice TE library it agrees with
-TEsorter 1 on 99.7% of calls (100% at Order). Existing scripts and EDTA need no changes.
+Same arguments and same output names (`TElib.fa.rexdb-plant.cls.tsv`, `.cls.lib`, `.dom.gff3`, ...)
+as TEsorter 1, with TEsorter's filters and count-based voting. 
 
 ## Common options
 
