@@ -20,6 +20,7 @@ schema has been simplified to the columns classify_ltr_paf_fast emits.
 
 import logging
 import os
+import resource
 import tempfile
 import time
 from collections import defaultdict
@@ -34,15 +35,39 @@ log = logging.getLogger(__name__)
 
 
 def _get_classified_ids(conn):
-    """Get classified sequence IDs per database from classifier results."""
-    classified = defaultdict(set)
+    """Which databases produced hits on each sequence.
+
+    Reads the hit_seqs summary table, which store_legacy fills as the hits go
+    in, and dedupes here in Python. The table is append-only and carries
+    repeats across store_legacy calls; a set drops them far faster than asking
+    sqlite to.
+
+    This used to be `SELECT DISTINCT base_seq, database FROM legacy_hits`,
+    a scan of every hit row in the run to recover a few hundred thousand
+    distinct pairs. It cost 26 s of a 1,066 s partitioned run.
+
+    Returns:
+        classified: {base_seq: set(databases)}
+    """
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-    if "legacy_hits" in tables:
-        for row in conn.execute(
-            "SELECT DISTINCT base_seq, database FROM legacy_hits"
-        ):
-            classified[row[0]].add(row[1])
+
+    classified = defaultdict(set)
+    if "hit_seqs" in tables:
+        for base_seq, database in conn.execute(
+                "SELECT base_seq, database FROM hit_seqs"):
+            classified[base_seq].add(database)
+
+    # A results database written before hit_seqs existed, or by a path that
+    # does not go through store_legacy, still has to be readable. Falling back
+    # costs the old 26 s, which is the right trade for not silently treating
+    # every sequence as unclassified.
+    if not classified and "legacy_hits" in tables:
+        log.info("  No hit_seqs table; recovering targets from legacy_hits")
+        for base_seq, database in conn.execute(
+                "SELECT base_seq, database FROM legacy_hits"):
+            classified[base_seq].add(database)
+
     return dict(classified)
 
 
@@ -57,16 +82,16 @@ def split_classified_unclassified(input_fasta, classified_ids, outdir,
     qry_fasta = os.path.join(outdir, "blast_query.fa")
 
     nucl = (seq_type == "nucl")
-    fa = pyfastx.Fasta(input_fasta, build_index=True)
+    # build_index=False: one in-order pass, no lookups by name, so no SQLite
+    # sidecar index over the whole input.
+    fa = pyfastx.Fasta(input_fasta, build_index=False)
 
     n_classified = 0
     n_unclassified = 0
     db_seq_to_dbs = {}
 
     with open(db_fasta, "w") as dbh, open(qry_fasta, "w") as qh:
-        for rec in fa:
-            name = rec.name
-            seq = str(rec.seq)
+        for name, seq in fa:
             if nucl:
                 seq = "".join(c for c in seq.upper() if c in "ATCG")
             if name in classified_ids:
@@ -187,13 +212,32 @@ def classify_from_blast(tsv_rows, classifications):
     return new_classifications
 
 
+def _cpu_s():
+    """CPU seconds of this process and its reaped children. The blastn and
+    makeblastdb processes are children (or grandchildren through the pool
+    workers, which wait on them), so they land in RUSAGE_CHILDREN once the
+    pool has been joined."""
+    me = resource.getrusage(resource.RUSAGE_SELF)
+    kids = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return me.ru_utime + me.ru_stime + kids.ru_utime + kids.ru_stime
+
+
+def _stage_row(timing, name, t0, c0, cores):
+    """Log one sub-step's wall and CPU, and append it to `timing` if given."""
+    wall, cpu = time.time() - t0, _cpu_s() - c0
+    log.info("  %s: %.1fs wall, %.1fs cpu over %d core(s) (%.0f%% utilised)",
+             name, wall, cpu, cores, 100 * cpu / (wall * cores) if wall else 0)
+    if timing is not None:
+        timing.append((name, wall, cpu, cores))
+
+
 def blast_pass2(input_fasta, conn, hmm_classifications=None,
                 seq_type="nucl", n_processors=4,
                 min_identity=80, min_coverage=80, min_length=80,
                 outdir=None,
                 pass2_classified_fasta=None,
                 preset="asm20", minimap2_extra="",
-                aligner="blast", blast_task="megablast"):
+                aligner="blast", blast_task="megablast", timing=None):
     """Pass-2 similarity search (blastn by default, minimap2 opt-in).
 
     Args:
@@ -208,10 +252,10 @@ def blast_pass2(input_fasta, conn, hmm_classifications=None,
     if aligner == "minimap2":
         minimap.check_minimap2()
 
-    if seq_type != "nucl":
+    if seq_type != "nucl" and aligner == "minimap2":
         log.warning("minimap2 pass-2 only supports nucleotide sequences; "
-                    f"seq_type={seq_type!r} will be treated as nucl")
-        seq_type = "nucl"
+                    "using blastp for protein input")
+        aligner = "blast"
 
     classified_ids = _get_classified_ids(conn)
     if not classified_ids:
@@ -222,7 +266,7 @@ def blast_pass2(input_fasta, conn, hmm_classifications=None,
 
     if outdir is None:
         outdir = tempfile.mkdtemp(prefix="tesorter2_minimap2_")
-    work = os.path.join(outdir, "minimap2_pass2")
+    work = os.path.join(outdir, "blast_pass2")
 
     db_fasta, qry_fasta, db_seq_to_dbs = split_classified_unclassified(
         input_fasta, classified_ids, work, seq_type=seq_type)
@@ -244,7 +288,7 @@ def blast_pass2(input_fasta, conn, hmm_classifications=None,
         )
         merged_db = os.path.join(work, "pass2_db_merged.fa")
         pass2_external.merge_classified_fastas(
-            merged_db, db_fasta, src, clean_nucl=True
+            merged_db, db_fasta, src, clean_nucl=(seq_type == "nucl")
         )
         db_fasta = merged_db
 
@@ -254,6 +298,7 @@ def blast_pass2(input_fasta, conn, hmm_classifications=None,
 
     if aligner == "blast":
         from . import blast_backend
+        tb, cb = time.time(), _cpu_s()
         new_cls = blast_backend.run_pass2_blast(
             qry_fasta=qry_fasta, db_fasta=db_fasta, conn=conn,
             classifications=hmm_classifications,
@@ -264,7 +309,9 @@ def blast_pass2(input_fasta, conn, hmm_classifications=None,
             min_length=min_length,
             work=work,
             blast_task=blast_task,
+            seq_type=seq_type,
         )
+        _stage_row(timing, "blast_search", tb, cb, n_processors)
         log.info(f"  blast pass-2 total: {time.time() - t0:.1f}s")
         return new_cls
 
@@ -272,13 +319,12 @@ def blast_pass2(input_fasta, conn, hmm_classifications=None,
     tsv_out = os.path.join(work, "pass2.tsv")
 
     log.info(f"  Running minimap2 -x {preset} with {n_processors} threads")
-    t1 = time.time()
+    t1, c1 = time.time(), _cpu_s()
     run_alignment(
         query_fa=qry_fasta, target_fa=db_fasta, paf_out=paf_out,
         ncpu=n_processors, preset=preset, extra=minimap2_extra,
     )
-    t2 = time.time()
-    log.info(f"  minimap2 alignment: {t2 - t1:.1f}s")
+    _stage_row(timing, "minimap2_search", t1, c1, n_processors)
 
     min_pid = min_identity / 100.0
     min_cov = min_coverage / 100.0

@@ -27,7 +27,7 @@ GENOME="${TESORTER2_TEST_GENOME:-/anvil/projects/x-bio250374/daniel/minirice.fa}
 cd "$REG"; rm -rf so_elem so_compat so_genome
 
 echo "=== 1. element mode: SO columns in cls.tsv ==="
-"$REG/venv/bin/tesorter2" "$IN" -d rexdb -p 8 -o so_elem --prefix e >/dev/null 2>&1
+"$REG/venv/bin/tesorter2" sequences "$IN" -d rexdb -p 8 -o so_elem --prefix e >/dev/null 2>&1
 head -1 so_elem/e.cls.tsv
 echo "--- filas de ejemplo (TE, Order, Superfamily, SO_name, SO_ID) ---"
 awk -F'\t' 'NR>1{print "  "$2"/"$3" -> "$(NF-1)"  "$NF}' so_elem/e.cls.tsv | sort -u | head -5
@@ -37,13 +37,13 @@ echo "  (vacío = todas tienen SO válido)"
 
 echo
 echo "=== 2. compat mode: DEBE seguir siendo 7 columnas exactas ==="
-"$REG/venv/bin/tesorter2" "$IN" -d rexdb -p 8 --compat-tesorter-output -o so_compat --prefix c >/dev/null 2>&1
+"$REG/venv/bin/tesorter2" sequences "$IN" -d rexdb -p 8 --compat-tesorter-output -o so_compat --prefix c >/dev/null 2>&1
 head -1 so_compat/c.cls.tsv
 echo "  columnas: $(head -1 so_compat/c.cls.tsv | awk -F'\t' '{print NF}')  (debe ser 7)"
 
 echo
 echo "=== 3. genome mode: Ontology_term en el GFF3 ==="
-"$REG/venv/bin/tesorter2" "$GENOME" --genome -d rexdb -p 8 \
+"$REG/venv/bin/tesorter2" genome "$GENOME" -d rexdb -p 8 \
     -o so_genome --prefix g >/dev/null 2>&1
 G=$(ls so_genome/*.gff3 2>/dev/null | head -1)
 echo "  gff3: $G"

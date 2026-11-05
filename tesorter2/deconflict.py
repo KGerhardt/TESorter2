@@ -21,7 +21,8 @@ def _get_family(model_name):
 
 def _get_base_seq(target_name):
     """Strip frame suffix to get original sequence name."""
-    return target_name.rsplit("|", 1)[0]
+    from .subset import base_name
+    return base_name(target_name)
 
 
 def load_hits(db_path, table="legacy_hits", database=None):

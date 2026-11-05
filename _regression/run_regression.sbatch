@@ -54,7 +54,7 @@ echo "=== [2/2] NEW code (working tree) ==="
 # went unchecked. Run the checkout through PYTHONPATH instead: same interpreter
 # and dependencies, code under test is the working tree.
 PYTHONPATH="$DEV${PYTHONPATH:+:$PYTHONPATH}" \
-"$VENV/bin/python" -m tesorter2.pipeline "$INPUT" \
+"$VENV/bin/python" -m tesorter2.pipeline sequences "$INPUT" \
     -d rexdb -p 8 --db-dir "$DEV/tesorter2/database" -o "$REG/new_out" --prefix t
 
 echo

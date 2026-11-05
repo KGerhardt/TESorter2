@@ -81,17 +81,52 @@ SINE_CONFIG = {
     "clade_restrict": None,
 }
 
+# Pfam-derived TE domains. The model names are written in the REXdb convention
+# by build_pfam_te_db.py, so the REXdb parser reads them unchanged. No
+# `structures`: Pfam families are single domains and the add-on makes no claim
+# about domain architecture, so completeness is never asserted from it.
+PFAMTE_CONFIG = {
+    "name": "pfam-te",
+    "domain_remap": {},
+    "overlap_aware": False,
+    "structures": {},
+    "clade_parser": "rexdb",
+    "clade_restrict": None,
+}
+
+# Dfam curated DNA consensus models, cut into cost tiers by build_dfam_dbs.py,
+# which writes their names in the REXdb convention exactly as the Pfam TE
+# add-on does -- so the REXdb parser reads them unchanged. No `structures`: a
+# whole-element consensus is not a domain architecture, and these models make
+# no claim about which domains an element carries. One config serves all four
+# collections; they are disjoint slices of one library, not different
+# databases.
+DFAMDB_CONFIG = {
+    "name": "dfam",
+    "domain_remap": {},
+    "overlap_aware": False,
+    "structures": {},
+    "clade_parser": "rexdb",
+    "clade_restrict": None,
+}
+
 DB_CONFIGS = {
     "rexdb": REXDB_CONFIG,
     "gydb": GYDB_CONFIG,
     "line": LINE_CONFIG,
     "tir": TIR_CONFIG,
     "sine": SINE_CONFIG,
-    "sine-so": SINE_CONFIG,
+    "sine-animals": SINE_CONFIG,
+    "pfam-te": PFAMTE_CONFIG,
+    "dfam-core": DFAMDB_CONFIG,
+    "dfam-extended": DFAMDB_CONFIG,
+    "dfam-deep": DFAMDB_CONFIG,
+    "dfam-complete": DFAMDB_CONFIG,
 }
 
 # GyDB clade map: loaded from GyDB2.hmm.info (ships alongside GyDB2.hmm)
 from .paths import get_db_dir
+from .hmm import AMINO_ALPHABET
 from .so_map import lookup as so_lookup
 _GYDB_INFO_PATH = os.path.join(get_db_dir(), "GyDB2.hmm.info")
 
@@ -332,7 +367,7 @@ def apply_filters(hits, indices, min_cov=20.0, max_evalue=1e-3,
     return idx[mask]
 
 
-def select_domain_indices(hits, config, compat_rounding=False):
+def select_domain_indices(hits, config, compat_rounding=False, filters=None):
     """Indices of the domain assignments a classification run actually uses.
 
     This is steps 1-2 of classify_sequences (hmm2best, then apply_filters).
@@ -341,14 +376,16 @@ def select_domain_indices(hits, config, compat_rounding=False):
     competing model in the raw hit table.
     """
     best_idx = hmm2best(hits, config, compat_rounding=compat_rounding)
-    return apply_filters(hits, best_idx, compat_rounding=compat_rounding)
+    return apply_filters(hits, best_idx, compat_rounding=compat_rounding,
+                         **(filters or {}))
 
 
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
-def classify_element(genes, clades, models, scores, config, compat_voting=False):
+def classify_element(genes, clades, models, scores, config, compat_voting=False,
+                     model_lens=None, min_clade_delta=0.0):
     """Classify a single TE element from its domain hits.
 
     Args:
@@ -364,20 +401,80 @@ def classify_element(genes, clades, models, scores, config, compat_voting=False)
                        score-weighted vote.
 
     Returns:
-        (order, superfamily, clade, complete)
+        (order, superfamily, clade, complete, clade_delta)
+
+        clade_delta is the offset margin from clade_delta_star -- always
+        computed when model_lens is given, and reported whether or not
+        min_clade_delta is in use.
     """
     parser = config["clade_parser"]
 
     if parser == "rexdb":
         return _classify_rexdb(genes, clades, models, scores, config,
-                               compat_voting=compat_voting)
+                               compat_voting=compat_voting,
+                               model_lens=model_lens,
+                               min_clade_delta=min_clade_delta)
     elif parser == "gydb":
         return _classify_gydb(genes, clades, models, scores, config,
-                              compat_voting=compat_voting)
+                              compat_voting=compat_voting,
+                              model_lens=model_lens,
+                              min_clade_delta=min_clade_delta)
     elif parser == "sine":
-        return "SINE", "unknown", "unknown", "unknown"
+        return "SINE", "unknown", "unknown", "unknown", None
     else:
-        return "Unknown", "unknown", "unknown", "unknown"
+        return "Unknown", "unknown", "unknown", "unknown", None
+
+
+def clade_delta_star(clades, scores, model_lens):
+    """Smallest per-hit bit offset that would change the clade winner.
+
+    The clade vote is an argmax over summed *normalized* score,
+    W(c) = sum over that clade's hits of score/model_len. A per-hit offset of
+    delta bits therefore does NOT shift every clade equally -- it is divided by
+    model length, so
+
+        W_delta(c) = W(c) + delta * K(c),   K(c) = sum of 1/model_len
+
+    A clade carried by three short models gains far more from +delta than one
+    carried by a single long model. That asymmetry is why a systematic
+    inter-engine score offset moves clade calls at all: BATH scores ~5.6 bits
+    above pyhmmer on shared pairs, which is enough to reorder GyDB clades (314
+    models, clade encoded in the model name) while leaving superfamily intact.
+
+    For the winner w and any rival c, the two are level when
+
+        delta = (W(w) - W(c)) / (K(c) - K(w))
+
+    and this returns the smallest such |delta| over all rivals: the largest
+    offset the call can absorb in either direction and still stand. Big means
+    the call is robust to rescoring, a different engine, or a database
+    revision; small means it was decided by a margin no wider than the noise
+    between engines.
+
+    Returns inf when only one clade is in play (nothing to flip), and None if
+    model lengths were not supplied.
+    """
+    if model_lens is None:
+        return None
+    weights = defaultdict(float)
+    sens = defaultdict(float)
+    for c, s, ln in zip(clades, scores, model_lens):
+        weights[c] += s
+        if ln:
+            sens[c] += 1.0 / float(ln)
+    if len(weights) < 2:
+        return float("inf")
+    win = max(weights, key=lambda x: weights[x])
+    best = float("inf")
+    for c in weights:
+        if c == win:
+            continue
+        dk = sens[c] - sens[win]
+        if dk == 0:
+            # Same offset sensitivity: no uniform offset can ever reorder them.
+            continue
+        best = min(best, abs((weights[win] - weights[c]) / dk))
+    return best
 
 
 def _clade_winner(clades, scores, compat_voting, compat_rule="rexdb"):
@@ -417,9 +514,32 @@ def _clade_winner(clades, scores, compat_voting, compat_rule="rexdb"):
     return max_clade, len(weights), clear
 
 
-def _classify_rexdb(genes, clades, models, scores, config, compat_voting=False):
+def _demote(display_clade, delta, min_clade_delta):
+    """Blank a clade whose vote a small score offset could overturn.
+
+    Applied to the clade string ONLY, after classification is complete.
+    Routing it through the existing `clear` flag instead would be wrong: that
+    flag also propagates to superfamily and order when a sequence's domains
+    span several, so a clade-margin threshold would silently degrade
+    Gypsy -> mixture at superfamily and LTR -> mixture at order. Measured on a
+    400-sequence GyDB sample, 6 of 42 demotions moved superfamily and 3 moved
+    order. A margin on the clade vote is evidence about the clade and nothing
+    above it.
+    """
+    if min_clade_delta <= 0 or delta is None:
+        return display_clade
+    if delta >= min_clade_delta:
+        return display_clade
+    if display_clade in ("mixture", "unknown"):
+        return display_clade
+    return "mixture"
+
+
+def _classify_rexdb(genes, clades, models, scores, config, compat_voting=False,
+                    model_lens=None, min_clade_delta=0.0):
     """REXdb classification logic."""
     max_clade, n_distinct, clear = _clade_winner(clades, scores, compat_voting)
+    delta = None if compat_voting else clade_delta_star(clades, scores, model_lens)
 
     order, superfamily, _, _ = parse_clade_rexdb(
         [m for m, c in zip(models, clades) if c == max_clade][0])
@@ -453,13 +573,16 @@ def _classify_rexdb(genes, clades, models, scores, config, compat_voting=False):
     if display_clade.startswith("Ty"):
         display_clade = "unknown"
 
-    return order, superfamily, display_clade, complete
+    display_clade = _demote(display_clade, delta, min_clade_delta)
+    return order, superfamily, display_clade, complete, delta
 
 
-def _classify_gydb(genes, clades, models, scores, config, compat_voting=False):
+def _classify_gydb(genes, clades, models, scores, config, compat_voting=False,
+                   model_lens=None, min_clade_delta=0.0):
     """GyDB classification logic. Requires clade_map."""
     max_clade, n_distinct, clear = _clade_winner(
         clades, scores, compat_voting, compat_rule="gydb")
+    delta = None if compat_voting else clade_delta_star(clades, scores, model_lens)
 
     # Look up order/superfamily from clade map
     clade_map = config.get("_clade_map", {})
@@ -486,7 +609,8 @@ def _classify_gydb(genes, clades, models, scores, config, compat_voting=False):
     except KeyError:
         complete = "unknown"
 
-    return order, superfamily, display_clade, complete
+    display_clade = _demote(display_clade, delta, min_clade_delta)
+    return order, superfamily, display_clade, complete, delta
 
 
 # ---------------------------------------------------------------------------
@@ -494,13 +618,16 @@ def _classify_gydb(genes, clades, models, scores, config, compat_voting=False):
 # ---------------------------------------------------------------------------
 
 def classify_sequences(hits, config, gydb_clade_map=None, compat_rounding=False,
-                       compat_voting=False):
+                       compat_voting=False, min_clade_delta=0.0, filters=None):
     """Full classification: hmm2best -> filter -> classify per sequence.
 
     Args:
         hits: dict from deconflict.load_hits()
         config: database config dict
         gydb_clade_map: optional {clade: (order, superfamily)} for GyDB
+        filters: optional dict of apply_filters thresholds (min_cov,
+                 max_evalue, min_acc, min_norm_score); None keeps TEsorter's
+                 defaults (20, 1e-3, 0.5, 0.1).
         compat_voting: if True, decide the clade by raw domain-count plurality
                        (exact TEsorter replication) instead of the default
                        score-weighted vote.
@@ -521,7 +648,8 @@ def classify_sequences(hits, config, gydb_clade_map=None, compat_rounding=False,
     log.info(f"  hmm2best: {len(best_idx)} domain assignments")
 
     # Step 2: filter
-    filtered_idx = apply_filters(hits, best_idx, compat_rounding=compat_rounding)
+    filtered_idx = apply_filters(hits, best_idx, compat_rounding=compat_rounding,
+                                 **(filters or {}))
     log.info(f"  After filter: {len(filtered_idx)} assignments")
 
     # Step 3: group by base_seq and classify
@@ -563,6 +691,7 @@ def classify_sequences(hits, config, gydb_clade_map=None, compat_rounding=False,
         clades = []
         models = []
         scores = []
+        model_lens = []
         domain_strs = []
 
         for i in sorted_indices:
@@ -580,10 +709,12 @@ def classify_sequences(hits, config, gydb_clade_map=None, compat_rounding=False,
             clades.append(clade)
             models.append(model)
             scores.append(float(hits["norm_score"][i]))
+            model_lens.append(float(hits["model_len"][i]))
             domain_strs.append(f"{display_gene}|{clade}")
 
-        order, superfamily, max_clade, complete = classify_element(
-            genes, clades, models, scores, config, compat_voting=compat_voting)
+        order, superfamily, max_clade, complete, clade_delta = classify_element(
+            genes, clades, models, scores, config, compat_voting=compat_voting,
+            model_lens=model_lens, min_clade_delta=min_clade_delta)
 
         total_norm_score = float(np.sum(hits["norm_score"][sorted_indices]))
 
@@ -596,18 +727,25 @@ def classify_sequences(hits, config, gydb_clade_map=None, compat_rounding=False,
             "strand": strand,
             "domains": " ".join(domain_strs),
             "score": total_norm_score,
+            "clade_delta": clade_delta,
         })
 
     log.info(f"  Classified: {len(results)} sequences")
     return results
 
 
-def store_classifications(conn, results, database=None, mode="default"):
+def store_classifications(conn, results, database=None, mode="default",
+                          engine=None, stage=0):
     """Store classification results in SQLite.
 
-    The mode column discriminates default-mode classifications from
-    facet-mode classifications so both can coexist in a single
+    The mode column records which search path produced the call
+    ('default' or 'hierarchical'), so runs can coexist in a single
     companion database.
+
+    engine/stage carry cascade provenance: which search tool produced the
+    evidence behind this call and at which cascade position it was resolved.
+    Both are per-call rather than per-run because one database's sequences may
+    be resolved by different engines at different stages.
     """
     # Indexes on this table are built by results.finalize_db at the end
     # of the pipeline, not here — this function is called once per
@@ -623,25 +761,31 @@ def store_classifications(conn, results, database=None, mode="default"):
             strand      TEXT NOT NULL,
             domains     TEXT,
             source      TEXT NOT NULL DEFAULT 'hmm',
-            mode        TEXT NOT NULL DEFAULT 'default'
+            mode        TEXT NOT NULL DEFAULT 'default',
+            engine      TEXT,
+            stage       INTEGER NOT NULL DEFAULT 0
         )
     """)
 
     rows = [(r["id"], database, r["order"], r["superfamily"], r["clade"],
              r["complete"], r["strand"], r["domains"],
              r.get("blast_source", "hmm") if "blast_source" in r else "hmm",
-             mode)
+             mode,
+             r.get("engine", engine), r.get("stage", stage))
             for r in results]
 
     conn.executemany(
-        "INSERT INTO classifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO classifications (seq_id, database, te_order, superfamily, "
+        "clade, complete, strand, domains, source, mode, engine, stage) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     conn.commit()
 
 
 def export_classification_tsv(results, out_path, include_secondary=False,
-                              include_so=False, include_lineage=False):
+                              include_so=False, include_lineage=False,
+                              include_clade_delta=False):
     """Export classification results as TSV.
 
     Default format matches TEsorter cls.tsv (7 columns). If
@@ -649,7 +793,11 @@ def export_classification_tsv(results, out_path, include_secondary=False,
     per-database classifications and evidence scores in descending order.
     If include_so=True, appends the Sequence Ontology term and accession for
     the Order/Superfamily call. If include_lineage=True, appends the sub-clade
-    Lineage ('.' when no database resolved one). All optional columns are
+    Lineage ('.' when no database resolved one). If include_clade_delta=True,
+    appends CladeDelta -- the clade_delta_star offset margin, in bits: how large
+    a per-hit score offset the clade call can absorb before the winner changes.
+    'inf' means only one clade was in play; '.' means it was not computed.
+    All optional columns are
     appended, leaving the positions of the original seven untouched -- EDTA and
     friends read this file positionally as (id, order, superfamily).
     """
@@ -661,6 +809,8 @@ def export_classification_tsv(results, out_path, include_secondary=False,
         columns += ["SO_name", "SO_ID"]
     if include_lineage:
         columns.append("Lineage")
+    if include_clade_delta:
+        columns.append("CladeDelta")
     with open(out_path, "w") as f:
         f.write("\t".join(columns) + "\n")
         for r in results:
@@ -681,11 +831,65 @@ def export_classification_tsv(results, out_path, include_secondary=False,
                 line += [so_name, so_id]
             if include_lineage:
                 line.append(r.get("lineage") or ".")
+            if include_clade_delta:
+                d = r.get("clade_delta")
+                # "inf" = only one clade in play, nothing to flip; "." = not
+                # computed (compat voting, or no model lengths available).
+                line.append("." if d is None
+                            else ("inf" if d == float("inf") else f"{d:.4f}"))
             f.write("\t".join(line) + "\n")
 
 
-def _scope_aware_superfamily(pool, weighted_winner, scope):
+# A superfamily a database could not resolve. Not a competing claim -- the
+# absence of one -- so it does not enter the vote against a database that named
+# something. See _scope_aware_superfamily.
+UNRESOLVED_SUPERFAMILY = {"unknown", "none", "na", "n/a", ".", "-", ""}
+
+# The scope rule defers to a superfamily only one database can resolve, which
+# says nothing about how much evidence that database has for it. On Repbase
+# 31.07 the deferral is right 95 of 119 times it overrides the score vote, but
+# below a quarter of the winner's summed score it is right 1 time in 14 (GyDB
+# Retroviridae at ~0.2 taking REXdb's Gypsy at ~1.0). Requiring at least this
+# fraction of the score-vote winner's total makes it right 107 of 119.
+SCOPE_MIN_SCORE_RATIO = 0.25
+
+
+# Tiers in the primary arm's cross-database vote; lower is stronger. Only the
+# strongest tier that called a sequence votes on it. Every protein database
+# is tier 0, pfam-te included: on Repbase 31.07 its votes break Ginger ties
+# the right way and name the superfamily under REXdb's and GyDB's catch-alls
+# (97 LINE/unknown -> L1), and demoting it cost more than it saved.
+# DNA-alphabet databases (AnnoSINE) are tier 1: an nhmmer score is not on the
+# protein scale -- AnnoSINE was never right on a sequence a protein database
+# also called, yet its scores reached ten times theirs and took 48 correct
+# protein calls. Dfam is DNA too, but the pipeline runs it as a subordinate
+# round of its own, never in this vote. Shared by both pipelines, so the
+# standalone hierarchical CLI votes by the same rule.
+def vote_tier(name, alphabet):
+    return 0 if alphabet == AMINO_ALPHABET else 1
+
+
+def _scope_aware_superfamily(pool, weighted_winner, scope,
+                             unknown_competes=False,
+                             min_score_ratio=SCOPE_MIN_SCORE_RATIO):
     """Pick the winning (harmonized) superfamily with scope-aware deferral.
+
+    **An unresolved superfamily does not compete with a named one.** REXdb
+    carries one catch-all model per non-LTR order, so a LINE element it detects
+    comes back ``LINE/unknown`` -- a claim about the order with no claim about
+    the superfamily. Scored against the LINE database's ``LINE/L1``, REXdb's
+    deeper domain coverage wins the summed-score vote and the element loses its
+    superfamily entirely. On RepBase 31.07 that is 8,123 of the 8,264 sequences
+    where the reconciled superfamily disagreed with the curated label, and it
+    only happens in multi-database runs -- the default. The scope rule below was
+    meant to catch exactly this, but `resolves()` returns False for any
+    (db, superfamily) missing from clade_scope.tsv, which has rows for gydb and
+    rexdb only, so neither side ever qualified and it fell through to score.
+
+    Dropping unresolved entrants is done before the vote, so it applies to the
+    plain score fallback too. If every entrant is unresolved, they all stay and
+    the answer is unresolved, which is correct. Pass unknown_competes=True to
+    restore the previous behaviour.
 
     Generalizes the paper's two-database superfamily fusion to N databases and
     reduces to it exactly for two. When the databases disagree on superfamily,
@@ -693,17 +897,33 @@ def _scope_aware_superfamily(pool, weighted_winner, scope):
     can resolve that superfamily (it is uncontestable -- only this database can
     express it), and (b) the claiming database can resolve at least one of the
     competing superfamilies (it is competent about the alternatives, so its
-    different call is informative). If exactly one superfamily qualifies, it
-    wins; otherwise fall back to the plain summed-score vote (``base``).
+    different call is informative), and (c) its summed score is at least
+    ``min_score_ratio`` of the score-vote winner's -- uncontestable is not the
+    same as well supported. If exactly one superfamily qualifies, it wins;
+    otherwise fall back to the plain summed-score vote (``base``).
     """
+    if not unknown_competes:
+        named = [e for e in pool
+                 if str(e[2]["superfamily"]).strip().lower()
+                 not in UNRESOLVED_SUPERFAMILY]
+        if named:
+            pool = named
+
     sfs = {e[2]["superfamily"] for e in pool}
     base = weighted_winner(pool, "superfamily")
     if len(sfs) == 1:
         return base
 
+    totals = defaultdict(float)
+    for _db, r, h in pool:
+        totals[h["superfamily"]] += r["score"]
+    floor = min_score_ratio * totals[base]
+
     qualifiers = set()
     for db, _r, h in pool:
         s = h["superfamily"]
+        if totals[s] < floor:
+            continue
         others = {e[0] for e in pool if e[0] != db}
         contestable = any(resolves(od, s, scope) for od in others)
         if contestable:
@@ -715,7 +935,9 @@ def _scope_aware_superfamily(pool, weighted_winner, scope):
     return qualifiers.pop() if len(qualifiers) == 1 else base
 
 
-def reconcile_classifications(per_db_results, harmonization=None, scope=None):
+def reconcile_classifications(per_db_results, harmonization=None, scope=None,
+                              unknown_competes=False, tiers=None,
+                              scope_min_ratio=SCOPE_MIN_SCORE_RATIO):
     """Reconcile per-database classifications via hierarchical weighted vote.
 
     For each sequence classified by multiple databases, vote at each taxonomic
@@ -752,6 +974,11 @@ def reconcile_classifications(per_db_results, harmonization=None, scope=None):
             defaults to clade_harmonize.load_harmonization().
         scope: optional pre-loaded scope mask (for testing); defaults to
             clade_harmonize.load_scope().
+        tiers: optional {db_name: tier}, lower is stronger (missing = 0).
+            Only the strongest tier that called a sequence votes on it; a
+            weaker tier's call decides only when nothing above it called.
+            Every call still appears in ``secondary``. None = all vote.
+        scope_min_ratio: see _scope_aware_superfamily's min_score_ratio.
 
     Returns:
         list of dicts — one per sequence — with the primary result's fields
@@ -779,12 +1006,16 @@ def reconcile_classifications(per_db_results, harmonization=None, scope=None):
 
     reconciled = []
     for seq_id, entries in by_seq.items():
-        multi_db = len({db for db, _ in entries}) >= 2
+        voters = entries
+        if tiers:
+            top = min(tiers.get(db, 0) for db, _ in entries)
+            voters = [e for e in entries if tiers.get(e[0], 0) == top]
+        multi_db = len({db for db, _ in voters}) >= 2
 
         # Harmonize labels only when >= 2 databases weigh in; otherwise keep
         # native labels so single-database output is byte-identical to before.
         annotated = []
-        for db, r in entries:
+        for db, r in voters:
             if multi_db:
                 o_h, sf_h, c_h = harmonize(
                     db, r["order"], r["superfamily"], r["clade"], harmonization)
@@ -799,7 +1030,9 @@ def reconcile_classifications(per_db_results, harmonization=None, scope=None):
         pool = annotated
         for level in ("order", "superfamily", "clade"):
             if level == "superfamily" and multi_db:
-                winner = _scope_aware_superfamily(pool, weighted_winner, scope)
+                winner = _scope_aware_superfamily(pool, weighted_winner, scope,
+                                                unknown_competes=unknown_competes,
+                                                min_score_ratio=scope_min_ratio)
             else:
                 winner = weighted_winner(pool, level)
             pool = [e for e in pool if e[2][level] == winner]

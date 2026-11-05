@@ -27,17 +27,17 @@ LIB="${TESORTER2_TEST_LIB:-/anvil/projects/x-bio250374/daniel/bath_vs_hmmer/phas
 cd "$REG"; rm -rf sine_nh sine_hs
 
 echo "########## SINE db via nhmmer (new default) ##########"
-"$REG/venv/bin/python" -m tesorter2.pipeline "$IN" -d sine -p 8 \
+"$REG/venv/bin/python" -m tesorter2.pipeline sequences "$IN" -d sine -p 8 \
     --db-dir "$DEV/tesorter2/database" -o sine_nh --prefix s 2>&1 | grep -E "nhmmer search|Legacy search|hits in|Classified|Loaded"
 
 echo "########## SINE db via hmmsearch (escape hatch) ##########"
-"$REG/venv/bin/python" -m tesorter2.pipeline "$IN" -d sine -p 8 --dna-engine hmmsearch \
+"$REG/venv/bin/python" -m tesorter2.pipeline sequences "$IN" -d sine -p 8 --dna-engine hmmsearch \
     --db-dir "$DEV/tesorter2/database" -o sine_hs --prefix s 2>&1 | grep -E "nhmmer search|Legacy search|hits in|Classified|Loaded"
 
 echo
 echo "########## Did the AA path stay untouched? (rexdb) ##########"
 rm -rf rexdb_check
-"$REG/venv/bin/python" -m tesorter2.pipeline "$LIB" -d rexdb -p 8 \
+"$REG/venv/bin/python" -m tesorter2.pipeline sequences "$LIB" -d rexdb -p 8 \
     --db-dir "$DEV/tesorter2/database" -o rexdb_check --prefix t >/dev/null 2>&1
 # The baseline predates the SO columns, so compare the original 8 only.
 for f in t.cls.tsv t.rexdb.cls.tsv; do
