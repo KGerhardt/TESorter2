@@ -218,14 +218,13 @@ def parse_frame_suffix(target_name):
         return target_name, ".", "."
 
     seq_id, suffix = parts
-    if suffix.startswith("fwd"):
-        strand = "+"
-    elif suffix.startswith("rev"):
-        strand = "-"
-    else:
+    # Only the exact suffixes six_frame_translate_seq and the strand-tagging
+    # engines write; an ID that merely ends in '|reverse' is left whole.
+    if len(suffix) != 4 or suffix[:3] not in ("fwd", "rev") \
+            or suffix[3] not in "123":
         return target_name, ".", "."
-
-    frame = int(suffix[-1]) - 1  # 1-indexed in name -> 0-indexed
+    strand = "+" if suffix[:3] == "fwd" else "-"
+    frame = int(suffix[3]) - 1  # 1-indexed in name -> 0-indexed
     return seq_id, strand, frame
 
 

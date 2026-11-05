@@ -292,12 +292,9 @@ def _parse_frame_info(target_name):
         return target_name, ".", 0
 
     base_seq, suffix = parts
-    if suffix.startswith("fwd"):
-        return base_seq, "+", int(suffix[-1]) - 1
-    elif suffix.startswith("rev"):
-        return base_seq, "-", int(suffix[-1]) - 1
-    else:
-        return target_name, ".", 0
+    if len(suffix) == 4 and suffix[:3] in ("fwd", "rev") and suffix[3] in "123":
+        return base_seq, "+" if suffix[:3] == "fwd" else "-", int(suffix[3]) - 1
+    return target_name, ".", 0
 
 
 def _parse_domain_type(query_name):

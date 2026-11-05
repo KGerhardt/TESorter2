@@ -142,8 +142,9 @@ def hits_to_arrays(hits):
     env_from = np.array([h["env_from"] for h in hits], dtype=np.int32)
     env_to = np.array([h["env_to"] for h in hits], dtype=np.int32)
 
-    # Same derivations as deconflict._get_base_seq / _get_family.
-    base = np.array([t.rsplit("|", 1)[0] if "|" in t else t for t in target])
+    # Strip only a real frame/strand suffix (|fwd1, |rev3): protein input has
+    # none, and cutting at the last '|' merged IDs like 'X|a' and 'X|b'.
+    base = np.array([base_name(t) for t in target])
     family = np.array([
         m.split(":")[1].split("-")[-1] if ":" in m else m.split("_")[0]
         for m in model])
