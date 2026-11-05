@@ -14,7 +14,15 @@ dependencies:
   - numpy
   - pip:
       - -e .
-# NOTE: BATH (bathsearch/bathconvert) is not on bioconda. It is only needed
-# for --bath runs; build it from source (https://github.com/TravisWheelerLab/BATH)
-# and put the binaries on PATH or set BATH_BIN_DIR.
+# NOTE: nail (the optional first cascade stage) is a Rust binary from
+# crates.io: `cargo install nail`. It also needs MMseqs2, which it shells out
+# to for seeding -- add `mmseqs2` to the dependencies above if you want it, or
+# install separately. Only required when a --stages list includes nail.
+#
+# NOTE: BATH (bathsearch/bathconvert) is not on bioconda and publishes no
+# release binaries, so it must be built from source. Required for --genome
+# runs against a protein database (genome mode has no other protein engine)
+# and for --bath; a DNA-only genome run does not need it. See the README's
+# BATH section for the build recipe, then put BATH/src on PATH or set
+# BATH_BIN_DIR.
 # The HMM databases ship inside the package: no download step is needed.

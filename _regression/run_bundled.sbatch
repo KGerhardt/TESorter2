@@ -34,7 +34,7 @@ cd /tmp                       # deliberately outside the checkout
 rm -rf "$REG/bundled_out"
 
 echo "=== tesorter2 with NO --db-dir, from a wheel-only install ==="
-"$REG/venv_clean/bin/tesorter2" "$INPUT" -d rexdb -p 8 \
+"$REG/venv_clean/bin/tesorter2" sequences "$INPUT" -d rexdb -p 8 \
     -o "$REG/bundled_out" --prefix t
 
 echo

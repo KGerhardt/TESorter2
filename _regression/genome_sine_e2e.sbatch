@@ -8,14 +8,15 @@
 #SBATCH --output=logs/gsine_%j.out
 #SBATCH --error=logs/gsine_%j.err
 
-# End-to-end check for genome mode + SINE: genome mode now routes DNA databases
+# End-to-end check for genome mode + SINE: genome mode routes DNA databases
 # (e.g. sine) through nhmmer to find non-coding elements, alongside the protein
-# domains found by HMMER/BATH. Validates:
+# domains found by BATH (the only protein engine in genome mode). Both engines
+# report nucleotide coordinates, so every run emits .dom.fna and never .dom.faa.
+# Requires bathsearch/bathconvert for the rexdb runs. Validates:
 #   1. mixed rexdb+sine: SINE_element features on BOTH strands, protein domains
-#      still typed CDS, and both .faa (AA domains) + .fna (nucl elements) emitted.
-#   2. sine-only: single-kind output is nucleotide-only (.fna, no .faa) and no
-#      longer raises "DNA-only databases unsupported".
-#   3. rexdb-only: single-kind output stays AA-only (.faa, no .fna), all CDS.
+#      still typed CDS, one .fna holding every feature and no .faa.
+#   2. sine-only: nucleotide-only output, no BATH required.
+#   3. rexdb-only: all CDS, .fna only.
 set -euo pipefail
 module load python/3.9.5
 # See run_regression.sbatch for why the checkout is resolved this way.
@@ -41,7 +42,7 @@ pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; status=1; }
 
 echo "########## 1. mixed genome: rexdb + sine ##########"
-"$PY" -m tesorter2.pipeline "$GENOME" --genome -d rexdb,sine -p 8 \
+"$PY" -m tesorter2.pipeline genome "$GENOME" -d rexdb,sine -p 8 \
     --db-dir "$DBDIR" -o gsine_mixed --prefix g >/dev/null 2>&1
 G=gsine_mixed/g.dom.gff3
 
@@ -62,21 +63,22 @@ strands=$(awk -F'\t' '$3=="SINE_element"{print $7}' "$G" | sort -u | tr -d '\n')
 [ "$strands" = "+-" ] && pass "SINEs recovered on BOTH strands" \
     || fail "SINE strands not both +/-: got '$strands'"
 
-# Mixed run must emit both sequence files, each non-empty and the right alphabet.
-if [ -s gsine_mixed/g.dom.faa ] && [ -s gsine_mixed/g.dom.fna ]; then
-    pass "both g.dom.faa and g.dom.fna emitted"
+# Protein search is BATH-only, so BATH domains and nhmmer elements are both
+# nucleotide and share one file. .dom.faa is never written by genome mode.
+if [ -s gsine_mixed/g.dom.fna ] && [ ! -e gsine_mixed/g.dom.faa ]; then
+    pass "mixed run emits g.dom.fna only (no .faa)"
 else
-    fail "expected both g.dom.faa and g.dom.fna non-empty"
+    fail "expected g.dom.fna non-empty and no g.dom.faa"
 fi
-# .fna records must be nucleotide (ACGTN only), .faa must contain amino acids.
+# Every record must be nucleotide (ACGTN only), BATH domains included.
 if grep -v "^>" gsine_mixed/g.dom.fna | grep -qiE "[^ACGTN]"; then
     fail "g.dom.fna contains non-nucleotide characters"
 else
     pass "g.dom.fna is nucleotide"
 fi
-# feature counts in GFF must equal records across the two FASTAs.
+# feature count in GFF must equal records in the single FASTA.
 n_feat=$(grep -vc "^#" "$G")
-n_seq=$(( $(grep -c "^>" gsine_mixed/g.dom.faa) + $(grep -c "^>" gsine_mixed/g.dom.fna) ))
+n_seq=$(grep -c "^>" gsine_mixed/g.dom.fna)
 [ "$n_feat" -eq "$n_seq" ] && pass "GFF features == FASTA records ($n_feat)" \
     || fail "GFF $n_feat features vs $n_seq FASTA records"
 # summary table has a SINE order row.
@@ -85,7 +87,7 @@ grep -qE "^SINE\b" gsine_mixed/g.genome.summary.tsv && pass "summary has SINE ro
 
 echo
 echo "########## 2. sine-only genome: nucleotide single-kind ##########"
-"$PY" -m tesorter2.pipeline "$GENOME" --genome -d sine -p 8 \
+"$PY" -m tesorter2.pipeline genome "$GENOME" -d sine -p 8 \
     --db-dir "$DBDIR" -o gsine_sine --prefix s >/dev/null 2>&1
 if [ -s gsine_sine/s.dom.fna ] && [ ! -e gsine_sine/s.dom.faa ]; then
     pass "sine-only emits .fna only (no .faa)"
@@ -98,22 +100,28 @@ only_sine=$(awk -F'\t' '$3!="" && $3!="SINE_element" && $0 !~ /^#/' gsine_sine/s
 
 echo
 echo "########## 3. rexdb-only genome: AA single-kind (no regression) ##########"
-"$PY" -m tesorter2.pipeline "$GENOME" --genome -d rexdb -p 8 \
+"$PY" -m tesorter2.pipeline genome "$GENOME" -d rexdb -p 8 \
     --db-dir "$DBDIR" -o gsine_rexdb --prefix r >/dev/null 2>&1
-if [ -s gsine_rexdb/r.dom.faa ] && [ ! -e gsine_rexdb/r.dom.fna ]; then
-    pass "rexdb-only emits .faa only (no .fna)"
+# BATH reports nucleotide coordinates on the whole chromosome, so even a
+# protein-only genome run emits nucleotide sub-sequences.
+if [ -s gsine_rexdb/r.dom.fna ] && [ ! -e gsine_rexdb/r.dom.faa ]; then
+    pass "rexdb-only emits .fna only (no .faa)"
 else
-    fail "rexdb-only output wrong: expected .faa only"
+    fail "rexdb-only output wrong: expected .fna only"
 fi
+# Neither engine needs the genome windowed, so no run writes cut.fa.
+[ ! -e gsine_rexdb/cut.fa ] && [ ! -e gsine_sine/cut.fa ] \
+    && pass "no run windows the genome (no cut.fa)" \
+    || fail "a genome run wrote cut.fa"
 only_cds=$(awk -F'\t' '$3!="" && $3!="CDS" && $0 !~ /^#/' gsine_rexdb/r.dom.gff3 | wc -l)
 [ "$only_cds" -eq 0 ] && pass "rexdb-only GFF is all CDS" \
     || fail "rexdb-only GFF has $only_cds non-CDS features"
 
 echo
 echo "########## 4. reconciliation: SINE annotation independent of co-searched DBs ##########"
-# nhmmer searches the raw input un-windowed and overlaps resolve within-type, so
+# Overlaps resolve within-type, so
 # the SINE_element set must be byte-identical whether or not rexdb was co-searched
-# (no cross-type eviction, no protein-path window cap perturbing nhmmer).
+# (no cross-type eviction).
 awk -F'\t' '$3=="SINE_element"{print $1"\t"$4"\t"$5"\t"$7}' gsine_sine/s.dom.gff3 | sort > /tmp/gsine_only.$$
 awk -F'\t' '$3=="SINE_element"{print $1"\t"$4"\t"$5"\t"$7}' gsine_mixed/g.dom.gff3 | sort > /tmp/gsine_mix.$$
 if diff -q /tmp/gsine_only.$$ /tmp/gsine_mix.$$ >/dev/null; then

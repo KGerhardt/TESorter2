@@ -11,7 +11,7 @@ from .sequence import parse_frame_suffix, aa_to_nucl_coords, load_sequences_dict
 
 
 _HIT_COLUMNS = """
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER NOT NULL,
     database    TEXT NOT NULL,
     target_name TEXT NOT NULL,
     base_seq    TEXT NOT NULL,
@@ -37,8 +37,25 @@ _HIT_COLUMNS = """
     env_from    INTEGER NOT NULL,
     env_to      INTEGER NOT NULL,
     acc         REAL NOT NULL,
-    search_mode INTEGER NOT NULL DEFAULT 0
+    search_mode INTEGER NOT NULL DEFAULT 0,
+    engine      TEXT NOT NULL DEFAULT '',
+    stage       INTEGER NOT NULL DEFAULT 0
 """
+# `id` is the hit's sequence position in the original input, not a row
+# identifier and deliberately not the rowid. Making it INTEGER PRIMARY KEY
+# aliased it onto the rowid, which meant inserting a row dictated where it
+# landed in the B-tree: a partitioned run merging groups in completion order
+# wrote non-monotonic rowids and paid page splits instead of appending. The
+# rowid is now arbitrary and never touched, so every insert appends and merge
+# order stops mattering. `id` carries what is actually useful -- where the
+# sequence sat in the input -- and is stable no matter how the input was split.
+#
+# engine/stage are the cascade's provenance: which tool produced a hit and at
+# which position in the per-database cascade. A single-engine run leaves engine
+# at the tool's own name and stage at 0. They are on the hit rows rather than
+# inferred later because a cascade run mixes engines within one database, and
+# scores from different engines are not on a comparable scale -- any analysis
+# that compares them has to be able to tell them apart.
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS sequences (
@@ -50,22 +67,64 @@ CREATE TABLE IF NOT EXISTS legacy_hits (
     {_HIT_COLUMNS}
 );
 
-CREATE TABLE IF NOT EXISTS facet_hits (
-    {_HIT_COLUMNS}
+-- Which (sequence, database) pairs produced any hit at all: the only thing
+-- BLAST pass-2 needs in order to pick its targets, and the only question
+-- anything asks of the hit rows during a run.
+--
+-- It exists so that nobody has to ask sqlite for it. The old route was
+-- `SELECT DISTINCT base_seq, database FROM legacy_hits`, which is a scan of
+-- every hit in the run -- 8.38 M rows to learn about 350 k facts, 26 s of a
+-- 1,066 s run. store_legacy fills this table instead, deduping in Python
+-- over rows it already holds, and pass-2 reads it back with a bare SELECT
+-- and dedupes in Python again. No DISTINCT, no WHERE, no index: sqlite only
+-- ever appends to this table and hands the whole of it back.
+--
+-- Deliberately not keyed. A primary key would dedupe across store_legacy
+-- calls for us, but only by making every insert an index probe, and it would
+-- make partition.merge fall back to INSERT OR IGNORE. Repeats across calls
+-- are cheap to carry and free to drop on read.
+CREATE TABLE IF NOT EXISTS hit_seqs (
+    base_seq    TEXT NOT NULL,
+    database    TEXT NOT NULL
 );
 """
 
-# Index creation is split by pipeline phase.
+# Every index here is built at the end of a run, by finalize_db. None of them
+# exists while the pipeline is working. They are for querying the finished
+# database afterwards.
 #
-# _HITS_TABLE_INDEXES: built once the search phase finishes writing all
-#   HMM hits and before the deconfliction/classification phase begins.
-#   Those phases read from legacy_hits / facet_hits via filters on
-#   database / base_seq / domain_type, which benefit from an index.
+# _HITS_TABLE_INDEXES used to be built mid-run, after the search phase and
+# before classification, on the belief that classification read legacy_hits
+# through them. It does not: reconcile_classifications takes the Python
+# objects the cascade already returned and never touches the connection.
+# On a 135k-sequence run that build cost 44 s and the reconciliation it was
+# meant to serve cost 0.03 s.
 #
-# _FINAL_INDEXES: built at the very end of the pipeline, after
-#   classifications and blast_hits are fully populated. Neither table
-#   is read during pipeline execution; these indexes exist for post-run
-#   interactive analysis.
+# Worse, the two things that DO read legacy_hits during a run were both made
+# slower by having them. `EXPLAIN QUERY PLAN` on this schema:
+#
+#   SELECT * FROM legacy_hits WHERE database = ?
+#       SEARCH legacy_hits USING INDEX idx_leg_db (database=?)
+#   SELECT DISTINCT base_seq, database FROM legacy_hits
+#       SCAN legacy_hits USING INDEX idx_leg_baseseq
+#       USE TEMP B-TREE FOR DISTINCT
+#
+# `database` holds eight distinct values, so the first plan pulls a third of
+# the table through random rowid lookups where a sequential scan would do.
+# The second scans an index and then does a rowid lookup per row to fetch
+# `database`, turning one sequential pass into a table's worth of random
+# reads. Random access is exactly the pattern the parallel filesystem a
+# cluster run writes to handles worst.
+#
+# The trade is not free in one direction: without an index, tesorter_output
+# scans the whole table once per database instead of seeking, which costs the
+# small databases (tir is 0.6% of rows) what it saves the large ones (rexdb is
+# a third). That read totalled 13.6 s across eight databases with the indexes
+# present, against 44 s to build them, so the net is clearly positive -- and
+# under --memory-db the scans are at RAM speed and the question disappears.
+#
+# The split between the two lists is kept because they cover different tables:
+# classifications and blast_hits are created on demand and may not exist.
 _HITS_TABLE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_leg_target  ON legacy_hits(target_name)",
     "CREATE INDEX IF NOT EXISTS idx_leg_baseseq ON legacy_hits(base_seq)",
@@ -73,13 +132,7 @@ _HITS_TABLE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_leg_domain  ON legacy_hits(domain_type)",
     "CREATE INDEX IF NOT EXISTS idx_leg_evalue  ON legacy_hits(i_evalue)",
     "CREATE INDEX IF NOT EXISTS idx_leg_db      ON legacy_hits(database)",
-    "CREATE INDEX IF NOT EXISTS idx_fac_target  ON facet_hits(target_name)",
-    "CREATE INDEX IF NOT EXISTS idx_fac_baseseq ON facet_hits(base_seq)",
-    "CREATE INDEX IF NOT EXISTS idx_fac_query   ON facet_hits(query_name)",
-    "CREATE INDEX IF NOT EXISTS idx_fac_domain  ON facet_hits(domain_type)",
-    "CREATE INDEX IF NOT EXISTS idx_fac_evalue  ON facet_hits(i_evalue)",
-    "CREATE INDEX IF NOT EXISTS idx_fac_db      ON facet_hits(database)",
-    "CREATE INDEX IF NOT EXISTS idx_fac_stage   ON facet_hits(search_mode)",
+    "CREATE INDEX IF NOT EXISTS idx_leg_engine  ON legacy_hits(engine)",
 ]
 
 _FINAL_INDEXES = [
@@ -101,23 +154,23 @@ _ALL_DEFERRED_INDEX_NAMES = [
     _index_name(s) for s in (_HITS_TABLE_INDEXES + _FINAL_INDEXES)
 ]
 
-# search_mode values within facet_hits: which stage produced the hit.
-# legacy_hits is a single, flat table of true default-mode output and
-# does not use this tag.
-FACET_STAGE_VERIFIED = 0
-FACET_STAGE_CROSS_FAMILY = 1
-FACET_STAGE_LEGACY_FALLBACK = 2
-
 _INSERT_COLS = (
     "database, target_name, base_seq, strand, frame, target_len, "
     "query_name, domain_type, query_len, "
     "evalue, score, bias, dom_num, dom_of, "
     "c_evalue, i_evalue, dom_score, dom_bias, "
     "hmm_from, hmm_to, ali_from, ali_to, "
-    "env_from, env_to, acc, search_mode"
+    "env_from, env_to, acc, search_mode, engine, stage"
 )
 
-_INSERT_PLACEHOLDERS = ", ".join(["?"] * 26)
+# Derived from _INSERT_COLS rather than hardcoded: the two must always agree,
+# and a stale count fails at insert time with an unhelpful message.
+_INSERT_PLACEHOLDERS = ", ".join(["?"] * len(_INSERT_COLS.split(",")))
+
+# Where base_seq sits in the tuples store_legacy inserts. The id column is
+# prepended to _INSERT_COLS, so everything shifts by one. Derived for the same
+# reason _INSERT_PLACEHOLDERS is.
+_BASE_SEQ_POS = 1 + [c.strip() for c in _INSERT_COLS.split(",")].index("base_seq")
 
 
 def create_db(db_path):
@@ -129,9 +182,15 @@ def create_db(db_path):
     .db, e.g. writing a second mode into a companion file) still gets
     the full benefit of deferred indexing: any indexes built by a
     prior finalize_db are dropped here and rebuilt at the end of this
-    run via index_hits_tables + finalize_db.
+    run by finalize_db.
     """
-    conn = sqlite3.connect(db_path)
+    return prepare_db(sqlite3.connect(db_path))
+
+
+def prepare_db(conn):
+    """create_db's work on a connection already open: bulk-insert tuning, the
+    schema, and the deferred indexes dropped. Separate so a database copied
+    into memory (`--extend --memory-db`) gets the same treatment."""
     # WAL trades a tiny durability window (losing only the last transaction
     # on a power cut) for much faster concurrent writes and amortized fsync.
     # synchronous=NORMAL skips the inner fsync between WAL writes and
@@ -150,13 +209,35 @@ def create_db(db_path):
     return conn
 
 
-def index_hits_tables(conn):
-    """Build indexes on legacy_hits and facet_hits.
+def backup_to(conn, db_path):
+    """Copy an in-memory results database to disk.
 
-    Call after the HMM search phase is complete (all hits written) and
-    before the classification/deconfliction phase begins. The subsequent
-    reads filter by database / base_seq / domain_type and benefit from
-    these indexes; inserts during the search phase do not.
+    sqlite's Online Backup API, not `VACUUM INTO`: backup copies pages as they
+    are, carrying the indexes across already built, and writes them
+    sequentially. VACUUM INTO repacks and rebuilds, which is the work being
+    avoided.
+
+    Building the database in memory matters because index creation is
+    random-write, which is the worst case for a parallel filesystem like the
+    scratch a cluster run writes to. Under `--memory-db` the whole results
+    database lives in RAM and reaches disk in one sequential pass at the end.
+    """
+    dest = sqlite3.connect(db_path)
+    try:
+        conn.commit()
+        conn.backup(dest)
+        dest.commit()
+    finally:
+        dest.close()
+
+
+def index_hits_tables(conn):
+    """Build the legacy_hits indexes.
+
+    Called by finalize_db, at the end of a run. Do not call it during one:
+    nothing in a pipeline run reads legacy_hits in a way these indexes help,
+    and two things read it in ways they actively hurt. The comment on
+    _HITS_TABLE_INDEXES has the query plans.
     """
     for stmt in _HITS_TABLE_INDEXES:
         conn.execute(stmt)
@@ -164,17 +245,21 @@ def index_hits_tables(conn):
 
 
 def finalize_db(conn):
-    """Build the remaining indexes and checkpoint the WAL.
+    """Build every index and checkpoint the WAL.
 
     Call once at the end of the pipeline, after classifications and
     blast_hits are fully populated. Truncating the WAL into the main
     database file leaves the output as a single self-contained .db with
     no sidecar -wal file.
 
+    This is the only place indexes are built. A run works against an
+    unindexed legacy_hits on purpose; see the comment on _HITS_TABLE_INDEXES.
+
     Tables classifications and blast_hits are created on-demand by
     their writer functions; if a pipeline run skipped those phases
     the table may not exist and its index is silently skipped.
     """
+    index_hits_tables(conn)
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     for stmt in _FINAL_INDEXES:
@@ -222,14 +307,20 @@ def _parse_domain_type(query_name):
     return query_name.split("_")[0]
 
 
-def _hits_to_rows(hits, db_name, search_mode=0):
-    """Convert hit dicts to insert-ready tuples."""
+def _hits_to_rows(hits, db_name, search_mode=0, engine="", stage=0,
+                  seq_index=None):
+    """Convert hit dicts to insert-ready tuples.
+
+    engine/stage stamp cascade provenance onto every row; they default to the
+    single-engine case so existing callers are unchanged.
+    """
     rows = []
     for h in hits:
         base_seq, strand, frame = _parse_frame_info(h["target_name"])
         domain_type = _parse_domain_type(h["query_name"])
 
         rows.append((
+            -1 if seq_index is None else seq_index.get(base_seq, -1),
             db_name,
             h["target_name"],
             base_seq,
@@ -256,36 +347,31 @@ def _hits_to_rows(hits, db_name, search_mode=0):
             h["env_to"],
             h["acc"],
             search_mode,
+            engine,
+            stage,
         ))
     return rows
 
 
-def store_legacy(conn, hits, db_name):
-    """Store true default-mode (exhaustive) search hits to legacy_hits.
+def store_legacy(conn, hits, db_name, engine="", stage=0, seq_index=None):
+    """Store search hits to legacy_hits, the only hits table.
 
-    legacy_hits is fully separate from facet_hits. Never write facet
-    outputs here, even when facet mode falls back to an exhaustive
-    leftover search; that belongs in facet_hits with the matching stage.
+    `seq_index` maps a sequence name to its position in the original input;
+    that position is written to the `id` column. Without it the column is -1,
+    which says "position unknown" rather than inventing an order.
     """
-    rows = _hits_to_rows(hits, db_name, search_mode=0)
+    rows = _hits_to_rows(hits, db_name, search_mode=0, engine=engine,
+                         stage=stage, seq_index=seq_index)
     conn.executemany(
-        f"INSERT INTO legacy_hits ({_INSERT_COLS}) VALUES ({_INSERT_PLACEHOLDERS})",
-        rows,
-    )
-    conn.commit()
-
-
-def store_facet(conn, hits, db_name, stage):
-    """Store facet-mode hits to facet_hits, stamped with the facet stage.
-
-    stage must be one of FACET_STAGE_VERIFIED, FACET_STAGE_CROSS_FAMILY,
-    FACET_STAGE_LEGACY_FALLBACK.
-    """
-    rows = _hits_to_rows(hits, db_name, search_mode=stage)
+        f"INSERT INTO legacy_hits (id, {_INSERT_COLS}) "
+        f"VALUES (?, {_INSERT_PLACEHOLDERS})", rows)
+    # Summarise as the rows go in. One pass over a list already in memory,
+    # and the set collapses a database's hits on a sequence to the single
+    # fact pass-2 needs. In a partitioned run this is per worker, so it is
+    # 64-way parallel and the parent never reads legacy_hits at all.
     conn.executemany(
-        f"INSERT INTO facet_hits ({_INSERT_COLS}) VALUES ({_INSERT_PLACEHOLDERS})",
-        rows,
-    )
+        "INSERT INTO hit_seqs (base_seq, database) VALUES (?, ?)",
+        {(r[_BASE_SEQ_POS], db_name) for r in rows})
     conn.commit()
 
 
@@ -299,7 +385,7 @@ def export_tsv(conn, tsv_path, table="pass2_hits", db_name=None):
         table: "pass1_hits" or "pass2_hits"
         db_name: if set, filter to this database only
     """
-    assert table in ("pass1_hits", "pass2_hits", "legacy_hits", "facet_hits")
+    assert table in ("pass1_hits", "pass2_hits", "legacy_hits")
 
     columns = [
         "database", "target_name", "target_len", "query_name", "query_len",
@@ -341,7 +427,7 @@ def export_best_hits_tsv(conn, tsv_path, nucl_lengths=None,
         table: "pass1_hits" or "pass2_hits"
         db_name: if set, filter to this database only
     """
-    assert table in ("pass1_hits", "pass2_hits", "legacy_hits", "facet_hits")
+    assert table in ("pass1_hits", "pass2_hits", "legacy_hits")
 
     db_filter = ""
     params = ()
@@ -422,7 +508,7 @@ def export_all_domains_tsv(conn, tsv_path, nucl_lengths=None,
         table: "pass1_hits" or "pass2_hits"
         db_name: if set, filter to this database only
     """
-    assert table in ("pass1_hits", "pass2_hits", "legacy_hits", "facet_hits")
+    assert table in ("pass1_hits", "pass2_hits", "legacy_hits")
 
     query = f"""
         SELECT database, target_name, target_len,
@@ -500,7 +586,7 @@ def export_domain_sequences(conn, fasta_path, aa_fasta, nucl_lengths=None,
         table: "pass1_hits" or "pass2_hits"
         db_name: if set, filter to this database only
     """
-    assert table in ("pass1_hits", "pass2_hits", "legacy_hits", "facet_hits")
+    assert table in ("pass1_hits", "pass2_hits", "legacy_hits")
 
     seqs = load_sequences_dict(aa_fasta)
 
@@ -565,7 +651,7 @@ def query_best_hits(conn, table="pass2_hits", db_name=None):
     Returns:
         list of sqlite3.Row objects
     """
-    assert table in ("pass1_hits", "pass2_hits", "legacy_hits", "facet_hits")
+    assert table in ("pass1_hits", "pass2_hits", "legacy_hits")
     conn.row_factory = sqlite3.Row
 
     where = ""

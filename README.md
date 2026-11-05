@@ -88,13 +88,13 @@ TEsorter2 is a reimplementation of [TEsorter](https://github.com/zhangrengang/TE
 keeps its classification semantics while introducing three major improvements:
  
 1. **Speed**: HMMER's limited parallelism is replaced by [pyHMMER](https://pyhmmer.readthedocs.io/)
-   with workload-aware load balancing, plus an optional facet pre-screen and a parallelized
+   with workload-aware load balancing, plus a parallelized
    second-pass BLAST.
 2. **Sensitivity on degraded copies**: an optional [BATH](https://github.com/TravisWheelerLab/BATH)
    engine performs frameshift-aware translated search directly against nucleotide sequence.
 3. **Reproducibility**: clade assignment uses a score-weighted vote instead of a count-based vote
    whose ties were broken by internal data-structure ordering.
-It also adds multi-database reconciliation in a single run and a genome mode for both engines.
+It also adds multi-database reconciliation in a single run and a BATH-based genome mode.
 
 Note: I should switch from default task (megablast) to dc-megablast.
 
@@ -121,29 +121,85 @@ pip install git+https://github.com/KGerhardt/TEsorter2.git
 
 ### Databases
 
-The HMM databases (REXdb, GyDB2, LINE, TIR, AnnoSINE) ship inside the package, as they do in
-TEsorter, so there is no download step and no configuration: `tesorter2 input.fasta` works
-straight after install.
+The HMM databases (REXdb, GyDB2, LINE, TIR, AnnoSINE, a Pfam-derived TE set and four Dfam curated
+collections) ship inside the package, as they do in TEsorter, so there is no download step and no
+configuration: `tesorter2 sequences input.fasta` works straight after install.
+
+The Dfam collections ship gzipped. An HMM file is text and gives back ~84% of its size, and nothing
+has to unpack them: pyHMMER's `HMMFile` detects gzip, and HMMER's `nhmmer` reads a `.gz` path
+directly. So there is no first-use step, nothing is written into the package directory at run time,
+and concurrent jobs sharing one install cannot race over a half-written file.
+
+> **GyDB2 is shipped modified.** Its 2009-era profiles carried no `COMPO` record, which HMMER and
+> pyHMMER tolerate but stricter HMMER3 readers (notably `nail`) reject outright. The bundled copy
+> adds `COMPO` to all 314 profiles, derived from each model's own match emissions by HMMER's
+> `p7_hmm_SetComposition()` — no probability was altered and no model was rebuilt. Verified to give
+> byte-identical hits and classifications. Full notice, rationale and reproduction steps in
+> [`tesorter2/database/LICENSES.md`](tesorter2/database/LICENSES.md).
 
 To use a custom collection of HMM databases instead, point TEsorter2 at its directory:
 
 ```bash
-tesorter2 input.fasta --db-dir /path/to/db     # or: export TESORTER2_DB=/path/to/db
+tesorter2 sequences input.fasta --db-dir /path/to/db   # or: export TESORTER2_DB=/path/to/db
 ```
 
 Individual databases can also be passed by path: `-d /path/to/custom.hmm`.
 
-### BATH (optional, only for `--bath`)
+### BATH (required for `--genome`, optional for `--bath`)
 
-[BATH](https://github.com/TravisWheelerLab/BATH) is not available on conda and must be built from
-source. Put `bathsearch`/`bathconvert` on `PATH`, or set `BATH_BIN_DIR`.
+[BATH](https://github.com/TravisWheelerLab/BATH) is not packaged on conda, and despite what its
+`INSTALL` file suggests, it publishes no release artifacts — the repo carries tags but zero
+releases. A source build is the only route. Easel is a separate clone, not a submodule:
+
+```bash
+git clone https://github.com/TravisWheelerLab/BATH.git
+cd BATH
+git clone -b BATH https://github.com/TravisWheelerLab/easel
+autoconf && ./configure && make
+```
+
+Binaries land in `BATH/src`. Put that on `PATH`, or set `BATH_BIN_DIR` to it. Verified against
+BATH 2.0 (`v2.0.0-rc4`); needs only gcc/make/autoconf.
+
+Genome mode searches protein profiles with BATH exclusively, so BATH is a hard requirement whenever
+`--genome` is used with an amino-acid database. A DNA-only genome run (`-d sine`) uses nhmmer and
+does not need BATH.
+
+### nail (optional, for cascade stages)
+
+[nail](https://github.com/TravisWheelerLab/nail) seeds with MMseqs2 and approximates HMMER's
+Forward/Backward. It is only needed when a `--stages` list includes `nail`:
+
+```bash
+cargo install nail        # needs MMseqs2 on PATH; nail shells out to it for seeding
+```
+
+It reads HMMER3 `.hmm` files directly, so there is no conversion step. Amino-acid only: it cannot
+search DNA profile databases and has no role in genome mode. Verified against nail 0.7.1 with
+MMseqs2 18.8cc5c.
+
+## Two modes
+
+The mode is a verb, because what the input *is* decides nearly everything downstream — which
+engines can run, whether there is a per-element classification at
+all:
+
+```bash
+tesorter2 sequences lib.fa      # pre-extracted TE sequences -> per-element classifications
+tesorter2 genome    asm.fa      # whole assembly -> domain-level GFF3 + summary
+```
+
+The older flag form (`tesorter2 lib.fa`, `tesorter2 asm.fa --genome`) still works and warns.
 
 ## Choosing an engine
  
 | | Element mode (pre-extracted TEs) | Genome mode (assembly) |
 |---|---|---|
-| **Intact / low-divergence sequence** | **pyHMMER** (default) : fastest | **pyHMMER** or **BATH** |
-| **Degraded / frameshifted copies** | **BATH** (`--bath`) : slower than pyHMMER, more sensitive | **BATH** (`--bath`) : both faster *and* more sensitive |
+| **Intact / low-divergence sequence** | **pyHMMER** (default) : fastest | **BATH** (only engine) |
+| **Degraded / frameshifted copies** | **BATH** (`--bath`) : slower than pyHMMER, more sensitive | **BATH** (only engine) : both faster *and* more sensitive |
+
+Genome mode offers no engine choice: BATH is both faster and more sensitive on long sequences, so
+the pyHMMER genome path was removed rather than kept as a slower, less sensitive alternative.
 
 ---
  
@@ -152,7 +208,7 @@ source. Put `bathsearch`/`bathconvert` on `PATH`, or set `BATH_BIN_DIR`.
 ### Default mode (pyHMMER)
  
 Single-pass `--nobias` search against all models via pyHMMER, in-process: `hmmsearch` for
-amino-acid databases, `nhmmer` for DNA databases (`sine`, `sine-so`).
+amino-acid databases, `nhmmer` for DNA databases (`sine`, `sine-animals`, Dfam).
  
 - Model-cost-aware parallel load balancing chooses between pyHMMER's `queries` and `targets`
   parallelization per model bin, reaching near-full CPU utilization (see
@@ -193,20 +249,6 @@ The practical effect is bounded: dropping the E-value filter altogether raises t
 to 59, so no threshold choice recovers much more. SINE-specific filters are not implemented; use
 `--dna-engine hmmsearch` if you need the old behaviour for comparison.
 
-### Facet mode (`--facet`)
- 
-Pre-screens amino-acid databases with spliced sub-HMMs ("facets") to route each sequence only to
-the models likely to produce its best hit:
- 
-1. **Facet screen**: tiered sub-HMMs (96 → 64 → 48 → 32 aa) searched against all six translated
-   frames.
-2. **Targeted verification**: top facet hit per domain family verified with a full-model
-   `--nobias` search.
-3. **Cross-family completion**: verified frames searched for missing domain families.
-4. **Legacy fallback**: frames with no facet signal get a full search.
-DNA databases always use the default search (nhmmer); DNA facets do not repay their overhead.
-Incompatible with `--bath` and `--genome`.
- 
 ### BATH mode (`--bath`)
  
 Replaces pyHMMER with `bathsearch --fs` for amino-acid databases. BATH aligns protein pHMMs
@@ -221,8 +263,8 @@ recovered as a single hit with its true extent. No six-frame translation is perf
   minimum-accuracy filter is a no-op for BATH hits.
 - Minus-strand coordinates are normalized to ascending order, with strand encoded in the target
   suffix, matching the HMMER convention.
-- Incompatible with `--facet`.
-- 
+- Implied by `--genome`, where BATH is the only protein engine.
+
 ### Genome mode (`--genome`)
  
 Treats the input as whole-genome sequence rather than pre-extracted elements: detects TE protein
@@ -230,21 +272,49 @@ domains throughout, classifies **each domain individually**, resolves overlappin
 emits a domain-level GFF3 plus a summary table. It does not produce a per-element `.cls.tsv` and
 does not run BLAST pass-2, matching TEsorter's `-genome` behaviour.
  
-- **pyHMMER**: six-frame translates each window, then maps amino-acid envelope coordinates back to
-  nucleotide space. Window size is capped automatically to stay under pyHMMER's 100k-residue
-  per-sequence limit; the retained overlap exceeds any TE domain, so no domains are lost.
-- **`--bath`**: runs `bathsearch --fs` directly on nucleotide windows. The tblout already reports
-  nucleotide coordinates and strand, so no translation or coordinate back-mapping is needed. BATH
-  additionally streams long targets in ~0.25 Mb blocks overlapped by the maximum expected hit
-  length, reconciling boundary duplicates internally.
-Window size: `--win-size` (default `1e6`), `--win-ovl` (default `1e5`).
-Requires at least one amino-acid database; DNA-only databases (`sine`) are skipped.
-Incompatible with `--facet`.
+Protein domains are found with **BATH only**. `bathsearch --fs` runs directly on the nucleotide
+chromosomes; the tblout already reports nucleotide coordinates and strand, so no six-frame translation
+or coordinate back-mapping happens at all. BATH additionally streams long targets in ~0.25 Mb
+blocks overlapped by the maximum expected hit length, reconciling boundary duplicates internally.
+`--bath` is therefore implied and has no effect here.
+
+DNA databases (`sine`) are searched with nhmmer, which streams long targets the same way. Neither
+engine needs the genome windowed, so it is searched as given. A DNA-only run is supported and needs
+no BATH.
+
+Overlaps are resolved within each feature type, so a BATH protein-domain feature (`CDS`) and an
+nhmmer element feature (e.g. `SINE_element`) at the same locus coexist as independent layers rather
+than evicting one another.
+
+Requires at least one database.
  
 ### Multiple databases
  
-TEsorter2 accepts several databases in one run (`-d rexdb,gydb`) and reconciles them in three
-stages:
+**Most bundled databases are searched by default.** Omitting `-d` searches rexdb, gydb, line, tir,
+sine, sine-animals, pfam-te and dfam-core; pass `-d rexdb,gydb` to restrict the set, or
+`--max-search` to force every alias including the ones that are off by default (the
+deeper Dfam collections). Each primary database classifies independently and reconciliation resolves
+them afterwards, so more databases means more evidence rather than more ambiguity — at
+proportionally more compute.
+
+#### Subordinate databases
+
+The four Dfam collections (`dfam-core`, `dfam-extended`, `dfam-deep`, `dfam-complete`) are a
+**fallback layer, not competitors**. They run after every primary database has classified what it
+can, against only the sequences that were left unclassified, and they are reconciled among
+themselves rather than entering the cross-database vote. The protein cascade is the stronger
+evidence where it speaks, so a DNA consensus model is never given the chance to outvote it — it only
+fills gaps. The layer runs before BLAST pass-2, so the weaker nucleotide-similarity pass sees only
+what profile evidence could not reach.
+
+The aliases are **hierarchical**: `-d dfam-deep` searches `dfam-core`, `dfam-extended` and
+`dfam-deep`. The files themselves are disjoint, so nothing is searched twice.
+
+Each collection is the previous one plus the next tranche of models, ordered by measured cost per
+correctly recovered sequence, so each step costs roughly an order of magnitude more per label than
+the one before it. `dfam-core` is on by default; the rest are opt-in.
+
+The three reconciliation stages:
  
 1. **Independent classification**: each database classifies every element on its own, emitting a
    per-database `{prefix}.{db}.cls.tsv` in native TEsorter format.
@@ -336,20 +406,22 @@ tesorter2 <sequence> [options]
 | Flag | Default | Description |
 |---|---|---|
 | `sequence` | — | Input FASTA (TE library, or genome with `--genome`) |
-| `-d`, `--database` | `rexdb` | Comma-separated database aliases or paths |
-| `--max-search` | off | Search against all bundled databases |
+| `-d`, `--database` | all bundled | Comma-separated database aliases or paths |
+| `--max-search` | off | Search every database alias, including those off by default |
 | `-o`, `--outdir` | `{input}.TEsorter2` | Output directory |
 | `--db-dir` | bundled | Directory holding the HMM databases (see Installation) |
 | `--dna-engine` | `nhmmer` | Engine for DNA databases (`nhmmer` or `hmmsearch`) |
 | `--prefix` | input basename | Output file prefix |
 | `-p`, `--processors` | `4` | Processors |
-| `--facet` | off | Facet pre-screen mode (AA databases only) |
-| `--bath` | off | Frameshift-aware BATH engine (AA databases only) |
-| `--genome` | off | Genome mode: domain-level annotation + GFF3 |
-| `--win-size` | `1e6` | Genome mode window size |
-| `--win-ovl` | `1e5` | Genome mode window overlap |
+| `--no-partition` | partitioning **on** | `sequences` mode only. Searches the input as one unit instead of one balanced group per processor. Partitioning is the default and is 4.6x faster on 135k sequences over 64 cores |
+| `--memory-db` | off | `sequences` mode only. Build the results database in RAM and copy it out once at the end |
+| `-nocln`, `--no-cleanup` | cleanup **on** | `sequences` mode only. Keep intermediates (partition FASTAs and databases, translations, cascade handoffs, BLAST pass-2 scratch) under `primary/`, `subordinate/` and `blast_pass2/`. A failed run always keeps them |
+| `--emit-timing` | off | `sequences` mode only. Write `cascade_timing.tsv`, per-stage wall and CPU time. Diagnostic |
+| `--bath` | off | Frameshift-aware BATH engine (AA databases only; implied by `--genome`) |
+| `--stages` | off | Staged multi-engine cascade over AA databases, e.g. `nail,hmmer,bath` |
+| `--mask-stops` | off | Translate stop codons as `X` instead of `*`, letting profiles align through premature stops |
+| `--genome` | off | Genome mode: domain-level annotation + GFF3 (BATH required) |
 | `--emit-bath` | off | Emit routed FASTA partitions for BATH to `{outdir}/BATHwater/` |
-| `--include-sine-so` | off | Include the SINE_SO model in AnnoSINE searches |
 | `--compat-tesorter-voting` | off | Raw domain-count clade vote (TEsorter behaviour) |
 | `--compat-tesorter-rounding` | off | Round normalized scores to 2 dp before filtering (replicates a TEsorter bug) |
 | `--compat-tesorter-output` | off | Emit combined `.cls.tsv` in TEsorter's 7-column format |
@@ -361,15 +433,14 @@ tesorter2 <sequence> [options]
 | File | Description |
 |---|---|
 | `{prefix}.db` | SQLite database with all hits, classifications and BLAST results |
-| `{prefix}.aa` | Six-frame translated amino-acid sequences (indexed; HMMER path only) |
 | `{prefix}.{db}.cls.tsv` | Per-database classifications (order, superfamily, clade, completeness) |
+| `{prefix}.{db}.cls.lib` | Per-database RepeatMasker library |
 | `{prefix}.cls.tsv` | Combined classifications across databases + BLAST pass-2 (+ `SecondaryHits`, `SO_name`, `SO_ID`) |
-| `{prefix}.{db}.classifications.tsv` | Facet classifications with confidence tiers (`--facet`) |
+| `cascade_timing.tsv` | With `--emit-timing`: per-stage search cost, one row per round (`primary`/`subordinate`), partition group, database and stage |
 | `{prefix}.dom.gff3` | Genome mode: classified TE protein-domain features |
-| `{prefix}.dom.faa` / `.dom.fna` | Genome mode: domain sequences (AA for HMMER, nucleotide for BATH) |
+| `{prefix}.dom.fna` | Genome mode: nucleotide sequences of each classified feature |
 | `{prefix}.genome.summary.tsv` | Genome mode: Order/Superfamily/Clade tallies |
-| `blast_pass2/` | BLAST database and query chunks (temporary) |
-| `cut.fa` | Genome mode: windowed genome (temporary) |
+| `primary/`, `subordinate/`, `blast_pass2/` | Intermediates, deleted at the end of a successful `sequences` run unless `--no-cleanup` |
  
 ---
  
@@ -397,11 +468,13 @@ Complete *Oryza sativa* genome (~375 Mb) against REXdb.
 | Pipeline | Engine | Time | Speedup vs TEsorter |
 |---|---|---|---|
 | TEsorter | HMMER (`hmmscan`) | 2,127 s | 1.0× |
-| TEsorter2 | pyHMMER | 988 s | 2.2× |
+| TEsorter2 | pyHMMER *(path since removed)* | 988 s | 2.2× |
 | **TEsorter2** | **BATH** | **431 s** | **4.9×** |
  
 BATH is 2.3× faster than pyHMMER here because it avoids the six-frame translation and coordinate
-back-mapping that dominate the HMMER path on long sequences.
+back-mapping that dominate the HMMER path on long sequences. Being both faster and more sensitive
+on long targets is why the pyHMMER genome path was removed; the row is retained as the measurement
+that motivated the decision.
 
 ---
  
@@ -410,15 +483,14 @@ back-mapping that dominate the HMMER path on long sequences.
 | File | Description |
 |---|---|
 | `{prefix}.db` | SQLite database with all hits, classifications and BLAST results |
-| `{prefix}.aa` | Six-frame translated amino-acid sequences (indexed; HMMER path only) |
 | `{prefix}.{db}.cls.tsv` | Per-database classifications (order, superfamily, clade, completeness) |
+| `{prefix}.{db}.cls.lib` | Per-database RepeatMasker library |
 | `{prefix}.cls.tsv` | Combined classifications across databases + BLAST pass-2 (+ `SecondaryHits`, `SO_name`, `SO_ID`) |
-| `{prefix}.{db}.classifications.tsv` | Facet classifications with confidence tiers (`--facet`) |
+| `cascade_timing.tsv` | With `--emit-timing`: per-stage search cost, one row per round (`primary`/`subordinate`), partition group, database and stage |
 | `{prefix}.dom.gff3` | Genome mode: classified TE protein-domain features |
-| `{prefix}.dom.faa` / `.dom.fna` | Genome mode: domain sequences (AA for HMMER, nucleotide for BATH) |
+| `{prefix}.dom.fna` | Genome mode: nucleotide sequences of each classified feature |
 | `{prefix}.genome.summary.tsv` | Genome mode: Order/Superfamily/Clade tallies |
-| `blast_pass2/` | BLAST database and query chunks (temporary) |
-| `cut.fa` | Genome mode: windowed genome (temporary) |
+| `primary/`, `subordinate/`, `blast_pass2/` | Intermediates, deleted at the end of a successful `sequences` run unless `--no-cleanup` |
  
 ---
  
@@ -438,7 +510,7 @@ tesorter2-compat input.fasta -db rexdb -p 16 -pre out
 Supported: `-db/--hmm-database`, `--db-hmm`, `-st/--seq-type`, `-pre/--prefix`, `-p/--processors`,
 `-tmp/--tmp-dir`, `-cov/--min-coverage`, `-eval/--max-evalue`, `-prob/--min-probability`,
 `-score/--min-score`, `-dp2/--disable-pass2`, `-nolib/--no-library`, `-norc/--no-reverse`,
-`-nocln/--no-cleanup`, plus `--facet`.
+`-nocln/--no-cleanup`.
  
 ---
  
@@ -451,16 +523,9 @@ Supported: `-db/--hmm-database`, `--db-hmm`, `-st/--seq-type`, `-pre/--prefix`, 
 - **`sequence.py`** — FASTA ingestion (pyfastx) and six-frame translation (pyhmmer)
 - **`hmm.py`** — HMM loading, alphabet detection, optimized profile construction
 - **`bath_search.py`** — BATH engine: conversion, `bathsearch --fs` invocation, hit normalization
-- **`genome.py`** — Genome mode: windowing, per-domain classification, overlap resolution, GFF3/summary
+- **`genome.py`** — Genome mode: whole-chromosome search, per-domain classification, overlap resolution, GFF3/summary
 - **`results.py`** — SQLite persistence with pre-parsed columns (base_seq, strand, frame, domain_type)
 - **`deconflict.py`** — numpy-based hit deconfliction and parameterized filtering
-### Facet classification
- 
-- **`decompose_hmm.py`** — standalone sub-HMM decomposition and splicing (tiered windows,
-  configurable overlap; works for DNA and AA HMMs)
-- **`model_graph.py`** — cross-model similarity graph, precomputed for bundled databases
-- **`facet_classify.py`** — screen → verify → cross-family completion → legacy fallback
-- **`cross_family.py`** — targeted search for missing domain families in classified frames
 ### Classification and post-processing
  
 - **`classifier.py`** — config-driven classification from domain hits; per-database domain
@@ -471,44 +536,6 @@ Supported: `-db/--hmm-database`, `--db-hmm`, `-st/--seq-type`, `-pre/--prefix`, 
  
 ## Extended methods
  
-### HMM facets
- 
-pyHMMER exposes an HMM's emission probabilities in Python. TEsorter2 uses them to locate conserved
-subregions that most influence HMMER's decision-making, and extracts each such region into a
-"facet": a complete, self-contained HMM whose emission and transition probabilities are cloned from
-its parent over the corresponding window.
- 
-Facets are sized at 96, 64, 48 or 32 amino acids, using the longest size the parent supports;
-models of ≤32 aa are used as-is. Windows are chosen to maximize the summed emission probability
-over the parent and may overlap by at most 33% of facet length.
- 
-For a parent HMM of length *M* and a query of length *N*, one `hmmsearch` is a dynamic-programming
-matrix of size *M × N*. A facet search replaces *M* with a facet size *F* (*F* < *M*), yielding an
-*F × N* slice with a proportional reduction in work. Three properties make this profitable:
- 
-- **Short models are more decisive.** A full-length model accumulates information about search
-  effort across the whole sequence; a short model confirms or rejects a local region quickly.
-- **Facet scores predict full-length scores.** A good facet hit almost always implies a good
-  full-length hit, making facets a fast approximation of the final score.
-- **Facet sizes pack SIMD lanes.** 96/64/32 aa are consumed in 16-aa bites by HMMER's internals,
-  reducing low-level CPU waste relative to less divisible sizes.
-Facets do not reproduce their parent's domain detections exactly, so a full-length verification is
-still required for correctness. The acceleration comes from *skipping* verifications: the TE HMMs
-within each database are highly redundant (either wholly, as in single-type databases, or in
-subcollections, as in REXdb and GyDB), so most models in a cluster hit the same sequence at
-differing strengths and all but the best are discarded downstream anyway — yet detecting a weak hit
-costs exactly as much as detecting a strong one. TEsorter2 ships precomputed all-vs-all similarity
-graphs (obtained by searching each model's consensus against every other model in the database)
-that identify these clusters. Facet hits order the parent searches within each cluster from highest
-to lowest, and verification stops as soon as a high-scoring parent is confirmed — typically 1–2
-parent searches per cluster per sequence instead of dozens.
- 
-In effect, the deconfliction that would otherwise happen *after* an exhaustive search is moved
-*before* it, at the cost of a cheap approximate screen. Post-filter agreement with the exhaustive
-search is 99.98% at hit level and 99.8% at family recall (4 misses of 2,090 on rice REXdb).
- 
-The facet generation code is intentionally a separate module and is reusable in other projects.
- 
 ### Parallel strategy
  
 **Default search.** pyHMMER exposes two C-level parallelization schemes: `queries`, where each
@@ -516,31 +543,14 @@ thread takes one HMM and searches it against all sequences, and `targets`, where
 searched against models in parallel. `queries` is inherently more efficient unless there are few
 models.
  
-HMM runtime scales roughly with *M²*, so a single long model can dominate. AnnoSINE is the
-pathological case: `SINE_SO` (M≈4,100) accounts for ~71% of the model set's runtime, and under
-`queries` parallelism every other model finishes quickly while `SINE_SO` runs single-threaded for
->10× longer than all the rest combined.
+HMM runtime scales roughly with *M²*, so a single long model can dominate: under `queries`
+parallelism every other model finishes quickly while the long one runs single-threaded.
  
 TEsorter2 precomputes each model's expected cost (*M²*) and bins them: **small** models
 (cost ≤ 75th percentile + 2×IQR for that database) run in `queries` mode; **large** models run in
 `targets` mode. Sequences are reused from the same in-memory object across both searches, so the
 split is essentially free, yielding near-full CPU utilization in the most efficient mode available
 for each model class.
- 
-**Facet search.** Staged: facets from all models are searched with `--nobias` exactly as in the
-default search; top facet hits per sequence are ordered by quality, noting each facet's parent;
-each sequence is searched against its best facet's parent at full length. If it verifies, no
-further searches run; otherwise the next-best facet hit for a *different* parent is tried. Most
-sequences verify on the first attempt; almost all within three. Because verification stops at a
-single best hit, a cross-family pass then searches each verified sequence against the top facet
-hit's parent for every *other* TE family, preserving both primary and secondary labelling
-sensitivity. Sequences still unclassified fall back to the legacy search.
- 
-The expensive part of HMMER is finding a match. Facets route each sequence only to the models
-likely to produce its best hits, skipping the redundant weak hits that would be discarded anyway.
-The leftovers sent to the legacy search are mostly genuine rejects with no TE signal, and are
-cheap: a REXdb legacy search spends ~92% of its runtime on the ~71k of ~880k protein frames that
-actually contain hits.
  
 ---
 

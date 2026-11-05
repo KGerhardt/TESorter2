@@ -39,6 +39,7 @@ Issues = "https://github.com/KGerhardt/TEsorter2/issues"
 tesorter2 = "tesorter2.pipeline:main"
 tesorter2-compat = "tesorter2.tesorter_compat:main"
 tesorter2-emit = "tesorter2.emit:main"
+tesorter2-subset = "tesorter2.subset:main"
 
 [tool.setuptools]
 packages = ["tesorter2"]

@@ -88,16 +88,19 @@ def parse_domtbl_text(text):
 def build_sequence_block(aa_fasta, alphabet=None):
     """
     Build a DigitalSequenceBlock from a FASTA file.
+
+    build_index=False: this reads every record in order and never looks one up
+    by name, so an index buys nothing and costs a SQLite sidecar written per
+    call. That is once per stage per database -- about 21 times in a plain run,
+    but ~1,300 times when 64 partition workers each build their own, which is
+    real I/O against a filesystem already carrying the search.
     """
     if alphabet is None:
         alphabet = AMINO_ALPHABET
 
     seqs = []
-    for rec in pyfastx.Fasta(aa_fasta, build_index=True):
-        ts = easel.TextSequence(
-            name=rec.name.encode("ascii"),
-            sequence=str(rec.seq),
-        )
+    for name, seq in pyfastx.Fasta(aa_fasta, build_index=False):
+        ts = easel.TextSequence(name=name.encode("ascii"), sequence=seq)
         seqs.append(ts.digitize(alphabet))
 
     return easel.DigitalSequenceBlock(alphabet, seqs)
@@ -135,7 +138,7 @@ def _normalize_nucl_hit(hit):
 _EVALUE_FIELDS = ("evalue", "c_evalue", "i_evalue")
 
 
-def legacy_search_nucl(hmms, seq_block):
+def legacy_search_nucl(hmms, seq_block, megabases=None, n_workers=0):
     """
     Single-pass nobias search of DNA models against nucleotide sequence.
 
@@ -145,6 +148,18 @@ def legacy_search_nucl(hmms, seq_block):
     strands in one pass and handles long targets.
 
     bias_filter is off to match legacy_search (TEsorter's --nobias).
+
+    No model-size partitioning here, unlike legacy_search. That split exists to
+    choose between pyhmmer's parallel='queries' and parallel='targets', a switch
+    pyhmmer.nhmmer does not expose; nhmmer spreads queries across its threads on
+    its own. Hand-rolled target chunking on top of that competes with nhmmer's
+    own parallelism rather than adding to it.
+
+    n_workers is passed through as pyhmmer's ``cpus``. It is stated explicitly
+    rather than left at pyhmmer's default of 0 (auto-select via
+    psutil.cpu_count), so the thread count is the one the caller asked for with
+    -p instead of whatever the machine reports -- which on a shared or
+    cgroup-limited node is not the same number. Pass 0 to restore auto-select.
 
     E-values need care. Z does not mean the same thing to the two engines:
     hmmsearch's -Z is a number of comparisons, while nhmmer's -Z is a database
@@ -156,11 +171,23 @@ def legacy_search_nucl(hmms, seq_block):
     That reproduces the nhmmer binary exactly and keeps working if pyhmmer
     fixes the double-scaling.
     """
-    megabases = sum(len(s) for s in seq_block) / 1e6
+    # Caller may pin the search space. A staged cascade must, so that E-values
+    # do not improve simply because an upstream stage removed sequences.
+    if megabases is None:
+        megabases = sum(len(s) for s in seq_block) / 1e6
+
+    # Longest-first, for the same reason legacy_search's partitions are sorted:
+    # nhmmer dispatches queries to threads in order, so the expensive models
+    # should start first (see _partition_hmms_by_size).
+    # domZ is pinned alongside Z. Without it the conditional E-value is
+    # normalised against however many domains this particular target set
+    # produced, so c_evalue moves when the input is split even though every
+    # other E-value holds -- the protein path already pins both (Z=Z, domZ=Z).
     hits = _collect_hits(pyhmmer.nhmmer(
-        hmms, seq_block,
+        sorted(hmms, key=lambda h: -h.M), seq_block,
         bias_filter=False,
-        Z=1, E=1e10,
+        Z=1, domZ=1, E=1e10,
+        cpus=n_workers,
     ))
     for h in hits:
         for field in _EVALUE_FIELDS:
@@ -189,17 +216,31 @@ def _partition_hmms_by_size(hmms):
     iqr = q3 - q1
     threshold = q3 + 2.0 * iqr
 
-    normal = [h for h in hmms if h.M ** 2 <= threshold]
-    outliers = [h for h in hmms if h.M ** 2 > threshold]
+    # Longest-first within each group. pyhmmer hands queries to its worker
+    # threads in the order given, so starting with the expensive models keeps
+    # the short ones as tail filler instead of leaving one long model running
+    # alone after everything else has finished (LPT scheduling). Measured on
+    # AnnoSINE (87 models, M 95-703) against 3000 targets: 16% faster at
+    # cpus=16, 12% at cpus=4, with an identical hit set.
+    normal = sorted((h for h in hmms if h.M ** 2 <= threshold),
+                    key=lambda h: -h.M)
+    outliers = sorted((h for h in hmms if h.M ** 2 > threshold),
+                      key=lambda h: -h.M)
 
     return normal, outliers
 
 
-def legacy_search(hmms, seq_block, optimized=None):
+def legacy_search(hmms, seq_block, optimized=None, n_workers=0):
     """
     Legacy mode: single-pass search with bias filter OFF on all sequences
     against all models. Equivalent to TEsorter's --nobias behavior, just
     faster (hmmsearch instead of hmmscan, pyhmmer instead of subprocess).
+
+    n_workers becomes pyhmmer's ``cpus``. Left at pyhmmer's default of 0 it
+    auto-selects every core, which is right for a search that owns the machine
+    and wrong the moment there are several of them: under --partition, 64
+    workers each asking for all 64 cores oversubscribed badly enough to show up
+    as cpu/wall of 3.3 on stages that had asked for one thread each.
 
     Models are partitioned by M^2 cost: normal models use parallel='queries'
     (faster when models are similarly sized), outliers use parallel='targets'
@@ -226,6 +267,7 @@ def legacy_search(hmms, seq_block, optimized=None):
             bias_filter=False,
             Z=Z, domZ=Z, E=1e10, domE=1e10,
             parallel="targets",
+            cpus=n_workers,
         ))
 
     normal, outliers = _partition_hmms_by_size(hmms)
@@ -239,11 +281,16 @@ def legacy_search(hmms, seq_block, optimized=None):
             bias_filter=False,
             Z=Z, domZ=Z, E=1e10, domE=1e10,
             parallel="queries",
+            cpus=n_workers,
         )
         all_hits.extend(_collect_hits(results_iter))
 
     if outliers:
-        names = [h.name for h in outliers]
+        # pyhmmer returns HMM names as bytes, so this log line has to decode
+        # before joining -- it only fires when a database has outlier-sized
+        # models, which is why it went unnoticed.
+        names = [h.name.decode() if isinstance(h.name, (bytes, bytearray))
+                 else str(h.name) for h in outliers]
         log.info(f"    {len(outliers)} outlier models (parallel=targets): "
                  f"{', '.join(n[:40] for n in names[:3])}"
                  f"{'...' if len(names) > 3 else ''}")
@@ -252,6 +299,7 @@ def legacy_search(hmms, seq_block, optimized=None):
             bias_filter=False,
             Z=Z, domZ=Z, E=1e10, domE=1e10,
             parallel="targets",
+            cpus=n_workers,
         )
         all_hits.extend(_collect_hits(results_iter))
 

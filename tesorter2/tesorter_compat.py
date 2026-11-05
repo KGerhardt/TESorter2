@@ -8,7 +8,7 @@ as a drop-in replacement.
 
 Usage:
     TEsorter input.fasta -db rexdb -p 4
-    TEsorter input.fasta -db rexdb -p 4 --facet
+    TEsorter input.fasta -db rexdb -p 4
 """
 
 import argparse
@@ -104,11 +104,6 @@ def parse_args():
                         default=False,
                         help="Do not clean up temporary directory")
 
-    # TEsorter2 extension
-    parser.add_argument("--facet", action="store_true", default=False,
-                        help="Use facet pre-screening for faster search "
-                             "(AA databases only)")
-
     return parser.parse_args()
 
 
@@ -147,10 +142,8 @@ def main():
     from .hmm import peek_alphabet, load_hmms, AMINO_ALPHABET, DNA_ALPHABET
     from .search import build_sequence_block, legacy_search
     from .sequence import translate_fasta, open_input, clean_seq
-    from .results import (create_db, store_sequences, store_legacy, store_facet,
-                         index_hits_tables, finalize_db,
-                         FACET_STAGE_VERIFIED, FACET_STAGE_CROSS_FAMILY,
-                         FACET_STAGE_LEGACY_FALLBACK)
+    from .results import (create_db, store_sequences, store_legacy,
+                         finalize_db)
     from .classifier import (classify_sequences, export_classification_tsv,
                             store_classifications, DB_CONFIGS)
     from .blast_pass2 import blast_pass2
@@ -198,36 +191,10 @@ def main():
         seq_fasta = args.sequence
 
     # Search
-    if args.facet and alphabet == AMINO_ALPHABET:
-        from .facet_classify import facet_classify, export_classifications_tsv
-        from .cross_family import find_missing_families, search_missing
-
-        classifications, verified_hits, legacy_hits = facet_classify(
-            db_path, seq_block, seq_fasta, alphabet,
-            n_workers=args.processors)
-
-        if verified_hits:
-            store_facet(conn, verified_hits, db_arg, stage=FACET_STAGE_VERIFIED)
-
-        # Cross-family
-        hmms = load_hmms(db_path)
-        hmms_dict = {h.name: h for h in hmms}
-        missing, _ = find_missing_families(classifications, hmms_dict)
-        if missing:
-            cf_hits = search_missing(missing, hmms_dict, seq_block, alphabet)
-            if cf_hits:
-                store_facet(conn, cf_hits, db_arg,
-                            stage=FACET_STAGE_CROSS_FAMILY)
-
-        if legacy_hits:
-            store_facet(conn, legacy_hits, db_arg,
-                        stage=FACET_STAGE_LEGACY_FALLBACK)
-        run_mode = "facet"
-    else:
-        hmms = load_hmms(db_path)
-        hits = legacy_search(hmms, seq_block)
-        store_legacy(conn, hits, db_arg)
-        run_mode = "default"
+    hmms = load_hmms(db_path)
+    hits = legacy_search(hmms, seq_block)
+    store_legacy(conn, hits, db_arg)
+    run_mode = "default"
 
     # Classify
     config = DB_CONFIGS.get(db_arg)
@@ -238,17 +205,25 @@ def main():
                 config = v
                 break
 
-    # Build hits-table indexes before the classification reads
-    index_hits_tables(conn)
-
+    # No index build before the read below. This mode searches one database,
+    # so `WHERE database = ?` matches essentially every row and an index on
+    # that column only adds a rowid lookup per row. finalize_db builds them.
+    results = []
+    blast_cls = []
+    if config is None:
+        log.warning(f"No classifier config for {db_arg}; nothing classified")
     if config:
-        hits_table = "facet_hits" if run_mode == "facet" else "legacy_hits"
-        db_hits = load_hits(db_out, table=hits_table, database=db_arg)
+        db_hits = load_hits(db_out, table="legacy_hits", database=db_arg)
         if db_hits:
             # Drop-in TEsorter mode: keep raw domain-count clade voting so
             # output matches TEsorter exactly. The score-weighted vote is the
             # default only in the main pipeline.py CLI.
-            results = classify_sequences(db_hits, config, compat_voting=True)
+            results = classify_sequences(
+                db_hits, config, compat_voting=True,
+                filters=dict(min_cov=args.min_coverage,
+                             max_evalue=args.max_evalue,
+                             min_acc=args.min_probability,
+                             min_norm_score=args.min_score))
             store_classifications(conn, results, database=db_arg, mode=run_mode)
 
             # Export TEsorter-format cls.tsv
@@ -292,7 +267,7 @@ def main():
     # Generate TEsorter-format output files
     if config and results:
         from .tesorter_output import generate_all_outputs
-        all_cls = results + (blast_cls if not args.disable_pass2 and 'blast_cls' in dir() else [])
+        all_cls = results + blast_cls
         generate_all_outputs(
             conn, prefix, db_arg, args.sequence,
             aa_fasta if alphabet == AMINO_ALPHABET and args.seq_type == "nucl" else None,
@@ -303,6 +278,13 @@ def main():
         )
 
     finalize_db(conn)
+
+    # -nocln keeps pass-2 scratch; by default remove it, as TEsorter does.
+    if not args.no_cleanup:
+        import shutil
+        scratch = os.path.join(args.tmp_dir or os.path.dirname(prefix) or ".",
+                               "blast_pass2")
+        shutil.rmtree(scratch, ignore_errors=True)
 
     t_end = time.time()
     log.info(f"Done in {t_end - t_start:.1f}s")

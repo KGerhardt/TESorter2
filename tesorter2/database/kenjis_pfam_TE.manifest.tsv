@@ -1,0 +1,51 @@
+tesorter2_name	pfam_id	pfam_acc	order	superfamily	clade	gene	n_repbase_hits	confidence	description
+Class_I/LINE/L1/L1:L1-Tnp_22_dsRBD	Tnp_22_dsRBD	PF17490.8	LINE	L1	L1	Tnp_22_dsRBD	261	OK-evidence	L1 transposable element dsRBD-like domain  [245/261 hits are LINE; commonest type L1 x245]
+Class_I/LINE/L1/L1:L1-Tnp_22_trimer	Tnp_22_trimer	PF17489.8	LINE	L1	L1	Tnp_22_trimer	38	OK-evidence	L1 transposable element trimerization domain  [36/38 hits are LINE; commonest type L1 x36]
+Class_I/LINE/L1/L1:L1-Transposase_22	Transposase_22	PF02994.21	LINE	L1	L1	Transposase_22	262	OK-evidence	L1 transposable element RBD-like domain  [248/262 hits are LINE; commonest type L1 x248]
+Class_I/LTR/Copia/LTR:LTR-RVT_2	RVT_2	PF07727.20	LTR	Copia	LTR	RVT_2	1	REVIEW	Reverse transcriptase (RNA-dependent DNA polymerase)
+Class_I/LTR/Copia/Retrovirus:Retrovirus-INT	gag_pre-integrs	PF13976.12	LTR	Copia	Retrovirus	INT	1	REVIEW	GAG-pre-integrase domain
+Class_I/LTR/Copia/Retrovirus:Retrovirus-Retrotran_gag_2	Retrotran_gag_2	PF14223.15	LTR	Copia	Retrovirus	Retrotran_gag_2	0	REVIEW	gag-polypeptide of LTR copia-type
+Class_I/LTR/Copia/Retrovirus:Retrovirus-Retrotran_gag_3	Retrotran_gag_3	PF14244.13	LTR	Copia	Retrovirus	Retrotran_gag_3	0	REVIEW	gag-polypeptide of LTR copia-type
+Class_I/LTR/Gypsy/LTR:LTR-Integrase_H2C2	Integrase_H2C2	PF17921.8	LTR	Gypsy	LTR	Integrase_H2C2	0	REVIEW	Integrase zinc binding domain
+Class_I/LTR/Gypsy/LTR:LTR-Integrase_p58_C	Integrase_p58_C	PF22938.3	LTR	Gypsy	LTR	Integrase_p58_C	0	REVIEW	Integrase p58, C-terminal domain
+Class_I/LTR/Gypsy/LTR:LTR-RT_RNaseH	RT_RNaseH	PF17917.8	LTR	Gypsy	LTR	RT_RNaseH	0	REVIEW	RNase H-like domain found in reverse transcriptase
+Class_I/LTR/Gypsy/LTR:LTR-RT_RNaseH_2	RT_RNaseH_2	PF17919.8	LTR	Gypsy	LTR	RT_RNaseH_2	0	REVIEW	RNase H-like domain found in reverse transcriptase
+Class_I/LTR/Gypsy/LTR:LTR-rve_3	rve_3	PF13683.13	LTR	Gypsy	LTR	rve_3	0	REVIEW	Integrase core domain
+Class_I/LTR/Gypsy/Retrovirus:Retrovirus-gag_asp_proteas	gag-asp_proteas	PF13975.12	LTR	Gypsy	Retrovirus	gag_asp_proteas	0	REVIEW	gag-polyprotein putative aspartyl protease
+Class_I/LTR/Retroviridae/LTR:LTR-Integrase_Zn	Integrase_Zn	PF02022.26	LTR	Retroviridae	LTR	Integrase_Zn	0	REVIEW	Integrase Zinc binding domain
+Class_I/LTR/Retroviridae/LTR:LTR-MLVIN_C	MLVIN_C	PF18697.8	LTR	Retroviridae	LTR	MLVIN_C	3	REVIEW	Murine leukemia virus (MLV) integrase (IN) C-terminal domain
+Class_I/LTR/Retroviridae/LTR:LTR-RVT_thumb	RVT_thumb	PF06817.20	LTR	Retroviridae	LTR	RVT_thumb	0	REVIEW	Reverse transcriptase thumb domain
+Class_I/LTR/Retroviridae/Retroviridae:Retroviridae-ENV	GP41	PF00517.23	LTR	Retroviridae	Retroviridae	ENV	9	OK-evidence	Retroviral envelope protein  [9/9 hits are LTR; commonest type ERV2 x8]
+Class_I/LTR/Retroviridae/Retroviridae:Retroviridae-Gag_p10	Gag_p10	PF02337.23	LTR	Retroviridae	Retroviridae	Gag_p10	18	OK-evidence	Retroviral GAG p10 protein  [18/18 hits are LTR; commonest type ERV2 x18]
+Class_I/LTR/Retroviridae/Retroviridae:Retroviridae-Gag_p30	Gag_p30	PF02093.21	LTR	Retroviridae	Retroviridae	Gag_p30	10	OK-evidence	Gag P30 core shell protein  [10/10 hits are LTR; commonest type ERV1 x10]
+Class_I/LTR/Retroviridae/Retroviridae:Retroviridae-INT	IN_DBD_C	PF00552.28	LTR	Retroviridae	Retroviridae	INT	9	OK-evidence	Integrase DNA binding domain  [9/9 hits are LTR; commonest type ERV2 x9]
+Class_I/LTR/Retroviridae/Retrovirus:Retrovirus-Gag_p24	Gag_p24	PF00607.26	LTR	Retroviridae	Retrovirus	Gag_p24	4	REVIEW	gag protein p24 N-terminal domain
+Class_I/LTR/Retroviridae/Retrovirus:Retrovirus-Gag_p24_C	Gag_p24_C	PF19317.5	LTR	Retroviridae	Retrovirus	Gag_p24_C	0	REVIEW	Gag protein p24 C-terminal domain
+Class_I/LTR/Retroviridae/Retrovirus:Retrovirus-zf_CCHC_5	zf-CCHC_5	PF14787.12	LTR	Retroviridae	Retrovirus	zf_CCHC_5	3	REVIEW	GAG-polyprotein viral zinc-finger
+Class_I/LTR/unknown/LTR:LTR-rve	rve	PF00665.33	LTR	unknown	LTR	rve	16	REVIEW	Integrase core domain
+Class_II/DNA/Helitron/unknown/Helitron:Helitron-Rep	Helitron_like_N	PF14214.12	Helitron	unknown	Helitron	Rep	5	OK-evidence	Helitron helicase-like domain at N-terminus  [5/5 hits are Helitron; commonest type Helitron x5]
+Class_II/DNA/TIR/EnSpm_CACTA/EnSpm_CACTA:EnSpm_CACTA-Transpos_assoc	Transpos_assoc	PF13963.12	TIR	EnSpm_CACTA	EnSpm_CACTA	Transpos_assoc	5	OK-evidence	Transposase-associated domain  [5/5 hits are TIR; commonest type EnSpm/CACTA x5]
+Class_II/DNA/TIR/EnSpm_CACTA/EnSpm_CACTA:EnSpm_CACTA-Transposase_23	Transposase_23	PF03017.19	TIR	EnSpm_CACTA	EnSpm_CACTA	Transposase_23	1	OK	TNP1/EN/SPM transposase
+Class_II/DNA/TIR/EnSpm_CACTA/EnSpm_CACTA:EnSpm_CACTA-Transposase_24	Transposase_24	PF03004.20	TIR	EnSpm_CACTA	EnSpm_CACTA	Transposase_24	16	OK-evidence	Plant transposase (Ptta/En/Spm family)  [16/16 hits are TIR; commonest type EnSpm/CACTA x16]
+Class_II/DNA/TIR/EnSpm_CACTA/Plavaka:Plavaka-TPase	Plavaka	PF18759.8	TIR	EnSpm_CACTA	Plavaka	TPase	86	OK-evidence	Plavaka transposase  [86/86 hits are TIR; commonest type EnSpm/CACTA x86]
+Class_II/DNA/TIR/EnSpm_CACTA/TIR:TIR-Transposase_21	Transposase_21	PF02992.21	TIR	EnSpm_CACTA	TIR	Transposase_21	0	REVIEW	Transposase family tnp2
+Class_II/DNA/TIR/Kolobok/Mutator:Mutator-TPase	Mutator	PF20700.4	TIR	Kolobok	Mutator	TPase	53	OK-evidence	Mutator-like transposase  [53/53 hits are TIR; commonest type Kolobok x53]
+Class_II/DNA/TIR/Merlin/TIR:TIR-DDE_Tnp_IS1595	DDE_Tnp_IS1595	PF12762.14	TIR	Merlin	TIR	DDE_Tnp_IS1595	0	REVIEW	ISXO2-like transposase domain
+Class_II/DNA/TIR/MuDR_Mutator/MuDR_Mutator:MuDR_Mutator-MULE	MULE	PF10551.16	TIR	MuDR_Mutator	MuDR_Mutator	MULE	0	OK	MULE transposase domain
+Class_II/DNA/TIR/MuDR_Mutator/MuDR_Mutator:MuDR_Mutator-Transposase_mut	Transposase_mut	PF00872.25	TIR	MuDR_Mutator	MuDR_Mutator	Transposase_mut	0	OK	Transposase, Mutator family
+Class_II/DNA/TIR/MuDR_Mutator/TIR:TIR-DBD_Tnp_Mut	DBD_Tnp_Mut	PF03108.21	TIR	MuDR_Mutator	TIR	DBD_Tnp_Mut	4	REVIEW	MuDR family transposase
+Class_II/DNA/TIR/P/P:P-RH	TNP-like_RNaseH_C	PF21789.4	TIR	P	P	RH	5	OK-evidence	TNP-like, RNase H C-terminal domain  [5/5 hits are TIR; commonest type P x5]
+Class_II/DNA/TIR/P/TIR:TIR-Tnp_P_element	Tnp_P_element	PF12017.14	TIR	P	TIR	Tnp_P_element	1	REVIEW	Transposable element P transposase-like, HTH domain
+Class_II/DNA/TIR/Tc1_Mariner/TIR:TIR-HTH_SB	HTH_SB	PF25787.2	TIR	Tc1_Mariner	TIR	HTH_SB	4	REVIEW	Sleeping Beauty transposase HTH domain
+Class_II/DNA/TIR/Tc1_Mariner/Tc1_Mariner:Tc1_Mariner-DDE_1	DDE_1	PF03184.26	TIR	Tc1_Mariner	Tc1_Mariner	DDE_1	9	OK-evidence	DDE superfamily endonuclease  [9/9 hits are TIR; commonest type Mariner/Tc1 x9]
+Class_II/DNA/TIR/Tc1_Mariner/Tc1_Mariner:Tc1_Mariner-DDE_3	DDE_3	PF13358.13	TIR	Tc1_Mariner	Tc1_Mariner	DDE_3	55	OK-evidence	DDE superfamily endonuclease  [55/55 hits are TIR; commonest type Mariner/Tc1 x55]
+Class_II/DNA/TIR/Tc1_Mariner/Tc1_Mariner:Tc1_Mariner-HTH_48	HTH_48	PF17906.8	TIR	Tc1_Mariner	Tc1_Mariner	HTH_48	13	OK-evidence	HTH domain in Mos1 transposase  [13/13 hits are TIR; commonest type Mariner/Tc1 x13]
+Class_II/DNA/TIR/Tc1_Mariner/Tc1_Mariner:Tc1_Mariner-HTH_Tnp_Tc3_2	HTH_Tnp_Tc3_2	PF01498.25	TIR	Tc1_Mariner	Tc1_Mariner	HTH_Tnp_Tc3_2	6	OK-evidence	Transposase  [6/6 hits are TIR; commonest type Mariner/Tc1 x6]
+Class_II/DNA/TIR/Tc1_Mariner/Tc1_Mariner:Tc1_Mariner-HTH_Tnp_Tc5	HTH_Tnp_Tc5	PF03221.23	TIR	Tc1_Mariner	Tc1_Mariner	HTH_Tnp_Tc5	26	OK-evidence	Tc5 transposase DNA-binding domain  [26/26 hits are TIR; commonest type Mariner/Tc1 x26]
+Class_II/DNA/TIR/Tc1_Mariner/Tc1_Mariner:Tc1_Mariner-Transposase_1	Transposase_1	PF01359.25	TIR	Tc1_Mariner	Tc1_Mariner	Transposase_1	5	OK-evidence	Transposase (partial DDE domain)  [5/5 hits are TIR; commonest type Mariner/Tc1 x5]
+Class_II/DNA/TIR/Tc1_Mariner/Tc1_mariner:Tc1_mariner-HTH_Tnp_Tc3_1	HTH_Tnp_Tc3_1	PF11427.15	TIR	Tc1_Mariner	Tc1_mariner	HTH_Tnp_Tc3_1	1	OK	Tc3 transposase
+Class_II/DNA/TIR/Tc1_Mariner/Tc1_mariner:Tc1_mariner-HTH_Tnp_Tc3_2_like	HTH_Tnp_Tc3_2_like	PF21517.4	TIR	Tc1_Mariner	Tc1_mariner	HTH_Tnp_Tc3_2_like	1	OK	Transposable element Tc3 transposase, HTH
+Class_II/DNA/TIR/hAT/TIR:TIR-DBD_Tnp_Hermes	DBD_Tnp_Hermes	PF10683.16	TIR	hAT	TIR	DBD_Tnp_Hermes	0	REVIEW	Hermes transposase DNA-binding domain
+Class_II/DNA/TIR/hAT/hAT:hAT-DIMER	Dimer_Tnp_hAT	PF05699.20	TIR	hAT	hAT	DIMER	66	OK-evidence	hAT family C-terminal dimerisation region  [66/66 hits are TIR; commonest type hAT x66]
+Class_II/DNA/TIR/hAT/hAT:hAT-hAT_like_RNase_H	hAT-like_RNase-H	PF14372.13	TIR	hAT	hAT	hAT_like_RNase_H	0	OK	hAT-like transposase, RNase-H fold
+Class_II/DNA/TIR/unknown/Tc1_mariner:Tc1_mariner-Transp_Tc5_C	Transp_Tc5_C	PF04236.21	TIR	unknown	Tc1_mariner	Transp_Tc5_C	1	OK	Tc5 transposase C-terminal domain
