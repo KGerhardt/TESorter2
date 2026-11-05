@@ -1,7 +1,70 @@
-# Apptainer image built from the Docker image (see container/README.md).
+# Apptainer image of TEsorter2 with every cascade engine (pyhmmer/HMMER,
+# nail, BATH), built without Docker. Same contents as container/Dockerfile.
+#
+# From the repository root:
 #   apptainer build tesorter2_2.0.0.sif container/tesorter2.def
-Bootstrap: docker-daemon
-From: tesorter2:2.0.0
+#
+# (With Docker available, the Docker image can be converted instead:
+#   apptainer build tesorter2_2.0.0.sif docker-daemon://tesorter2:2.0.0)
+
+Bootstrap: docker
+From: mambaorg/micromamba:1.5.10-bookworm-slim
+
+%arguments
+    BATH_COMMIT=4d2d38817224300f8087770fd4d5b095b9840960
+    EASEL_COMMIT=365a87aa2a5caf8d25f270ea6f4314fbff48523d
+
+%labels
+    org.opencontainers.image.title TEsorter2
+    org.opencontainers.image.version 2.0.0
+    org.opencontainers.image.source https://github.com/KGerhardt/TEsorter2
+    org.opencontainers.image.licenses GPL-3.0-or-later
+
+%files
+    pyproject.toml /opt/src/tesorter2/pyproject.toml
+    README.md /opt/src/tesorter2/README.md
+    LICENSE /opt/src/tesorter2/LICENSE
+    tesorter2 /opt/src/tesorter2/tesorter2
+    container /opt/src/tesorter2/container
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+
+    # BATH is not on conda: build it from source, pinned to the commit used
+    # in the TEsorter2 benchmarks. SSE is selected explicitly so the binary
+    # does not depend on the CPU of the build machine.
+    apt-get update
+    apt-get install -y --no-install-recommends build-essential autoconf git ca-certificates
+    cd /tmp
+    git clone https://github.com/TravisWheelerLab/BATH.git
+    cd BATH
+    git checkout {{ BATH_COMMIT }}
+    git clone https://github.com/TravisWheelerLab/easel.git
+    (cd easel && git checkout {{ EASEL_COMMIT }})
+    autoconf
+    ./configure --enable-sse
+    make -j"$(nproc)"
+    mkdir -p /opt/bath/bin
+    cp src/bathsearch src/bathconvert /opt/bath/bin/
+    cp LICENSE /opt/bath/LICENSE
+    printf 'BATH %s\neasel %s\n' {{ BATH_COMMIT }} {{ EASEL_COMMIT }} > /opt/bath/VERSION
+    cd /
+    rm -rf /tmp/BATH
+    apt-get purge -y build-essential autoconf git
+    apt-get autoremove -y
+    rm -rf /var/lib/apt/lists/*
+
+    # Runtime environment and TEsorter2 itself.
+    micromamba install -y -r /opt/conda -n base -f /opt/src/tesorter2/container/environment.yml
+    micromamba clean -a -y
+    /opt/conda/bin/pip install --no-deps --no-cache-dir /opt/src/tesorter2
+
+    # Pre-convert the bundled protein databases to BATH format beside the
+    # originals: the image is read-only at run time.
+    PATH=/opt/bath/bin:/opt/conda/bin:$PATH BATH_BIN_DIR=/opt/bath/bin \
+        /opt/conda/bin/python /opt/src/tesorter2/container/preconvert_bath.py
+    rm -rf /opt/src
 
 %environment
     export PATH=/opt/conda/bin:/opt/bath/bin:$PATH
@@ -11,8 +74,8 @@ From: tesorter2:2.0.0
     exec "$@"
 
 %test
-    tesorter2 --help > /dev/null
-    TEsorter --help > /dev/null
+    tesorter2 --version
+    TEsorter --version
     bathsearch -h > /dev/null
     nail --help > /dev/null
     nhmmer -h > /dev/null

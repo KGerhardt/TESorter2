@@ -8,20 +8,24 @@ the image).
 
 ## Build
 
-From the repository root:
+Docker, from the repository root:
 
 ```bash
 docker build -f container/Dockerfile -t tesorter2:2.0.0 .
 ```
 
-Apptainer, on a machine that has the Docker image:
+Apptainer, from the repository root. This needs no Docker and works unprivileged on most HPC
+systems (about 5 minutes, ~800 MB image):
 
 ```bash
 apptainer build tesorter2_2.0.0.sif container/tesorter2.def
 ```
 
-On an HPC system without Docker, build the image elsewhere, push it to a
-registry, and pull it with `apptainer pull docker://<registry>/tesorter2:2.0.0`.
+With a Docker image already built, `apptainer build tesorter2_2.0.0.sif docker-daemon://tesorter2:2.0.0`
+converts it instead.
+
+The bundled protein databases are converted to BATH format while the image is built, so runs
+start searching immediately even though the image is read-only.
 
 ## Run
 
