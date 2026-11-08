@@ -16,8 +16,9 @@ TEsorter's classification scheme and its command line, and adds:
   and Dfam are bundled. Each classifies independently and a score-weighted, scope-aware vote
   reconciles them, keeping every per-database call for auditing.
 - **Standard vocabulary.** Every call also carries its [Sequence Ontology](http://www.sequenceontology.org) term.
-- **Drop-in replacement.** The `TEsorter` command accepts TEsorter's arguments and writes the same
-  files.
+- **Drop-in replacement.** TEsorter2 takes TEsorter's command line unchanged (`-db`, `-pre`, `-p`,
+  `-cov`, `-genome`, ...): replacing `TEsorter` with `TEsorter2` in a command is enough. The
+  `TEsorter` command is also installed and runs TEsorter's own pipeline.
 
 ## Installation
 
@@ -37,7 +38,7 @@ A Docker / Apptainer image with every engine is described in
 
 ```bash
 docker build -f container/Dockerfile -t tesorter2:2.0.0 .
-docker run --rm -u $(id -u):$(id -g) -v "$PWD":/data tesorter2:2.0.0 tesorter2 sequences TEs.fa -p 8
+docker run --rm -u $(id -u):$(id -g) -v "$PWD":/data tesorter2:2.0.0 TEsorter2 TEs.fa -p 8
 ```
 
 ### From source
@@ -53,8 +54,8 @@ or, with HMMER and BLAST+ already on `PATH`, `pip install git+https://github.com
 
 ### BATH outside conda
 
-With a pip or source install, BATH has to be added by hand (it is optional for `sequences`, which
-skips the BATH stage with a warning, and required for `genome`). Download a prebuilt release from the [BATH releases page](https://github.com/TravisWheelerLab/BATH/releases)
+With a pip or source install, BATH has to be added by hand (it is optional when classifying TE
+sequences, where the BATH stage is skipped with a warning, and required for `-genome`). Download a prebuilt release from the [BATH releases page](https://github.com/TravisWheelerLab/BATH/releases)
 or build it from source:
 
 ```bash
@@ -69,14 +70,19 @@ TEsorter2 converts each database for BATH on first use and caches it.
 
 ## Quick start
 
+The command line is TEsorter's: an input FASTA, plus options. There is no mode to choose;
+`-genome` switches to whole-genome annotation, as in TEsorter.
+
 ### Classify a TE library
 
 ```bash
-tesorter2 sequences TElib.fa -p 16
+TEsorter2 TElib.fa -p 16
 ```
 
-Results go to `TElib.fa.TEsorter2/` (change with `-o`). The main file is `TElib.fa.cls.tsv`, one
-row per classified sequence (tab-separated; the last columns are shortened here):
+With no `-db`, every default database is searched (rexdb, gydb, line, tir, sine, sine-animals,
+pfam-te, dfam-core). Output files go to the working directory, named `TElib.fa.TEsorter2.*`
+(change with `-pre`). The main file is `TElib.fa.TEsorter2.cls.tsv`, one row per classified sequence
+(tab-separated; the last columns are shortened here):
 
 ```
 #TE                    Order  Superfamily  Clade      Complete  Strand  Domains                SecondaryHits                                      SO_name                    SO_ID       Lineage
@@ -84,56 +90,74 @@ Os1468_INT#LTR/Gypsy   LTR    Gypsy        Tekay/Del  yes       +       GAG|del 
 ```
 
 `SecondaryHits` lists every database's own call with its score, strongest first. Each database
-also gets its own `TElib.fa.{db}.cls.tsv` in TEsorter's original format.
+also gets its own `TElib.fa.TEsorter2.{db}.cls.tsv` in TEsorter's original format, and
+`TElib.fa.TEsorter2.cls.lib` is the RepeatMasker library.
+
+### One database, as in TEsorter
+
+```bash
+TEsorter2 TElib.fa -db rexdb-plant -p 16
+```
+
+This writes `TElib.fa.rexdb-plant.cls.tsv` and `TElib.fa.rexdb-plant.cls.lib`, the names TEsorter
+uses, with the calls of the TEsorter2 engine cascade. TEsorter's database names (`rexdb`,
+`rexdb-plant`, `rexdb-metazoa`, `gydb`, `rexdb-pnas`, `rexdb-line`, `sine`) work, as do
+TEsorter2's; `-db` also takes a comma-separated list, an HMM file, or `all`.
 
 ### Annotate TE domains in a genome
 
 ```bash
-tesorter2 genome assembly.fa -p 16
+TEsorter2 assembly.fa -genome -p 16
 ```
 
-This writes, in `assembly.fa.TEsorter2/`, `assembly.fa.dom.gff3` (one feature per classified domain, with its classification and
-SO term) and `assembly.fa.genome.summary.tsv` (counts per Order / Superfamily / Clade). Genome mode
-needs BATH for the protein databases.
+This writes `assembly.fa.TEsorter2.dom.gff3` (one feature per classified domain, with its
+classification and SO term) and `assembly.fa.TEsorter2.genome.summary.tsv` (counts per Order /
+Superfamily / Clade). Genome mode needs BATH for the protein databases. `-mask soft|hard` also
+writes the masked assembly.
 
-### Use it in place of TEsorter
+### TEsorter's own pipeline
 
 ```bash
 TEsorter TElib.fa -db rexdb-plant -p 16
 ```
 
-Same arguments and same output names (`TElib.fa.rexdb-plant.cls.tsv`, `.cls.lib`, `.dom.gff3`, ...)
-as TEsorter 1, with TEsorter's filters and count-based voting. 
+TEsorter's search (one database, rexdb by default, HMMER only), filters and count-based clade vote,
+with every TEsorter file (`.cls.tsv`, `.cls.lib`, `.cls.pep`, `.dom.gff3`, `.dom.tsv`, `.dom.faa`).
+Use it where downstream tools expect TEsorter 1 results exactly, as EDTA does.
 
 ## Common options
 
 ```bash
-# Choose databases (default: rexdb, gydb, line, tir, sine, sine-animals, pfam-te, dfam-core)
-tesorter2 sequences TElib.fa -d rexdb,gydb
+# Choose databases
+TEsorter2 TElib.fa -db rexdb,gydb
 
-# Add the deeper Dfam collections (dfam-extended < dfam-deep < dfam-complete)
-tesorter2 sequences TElib.fa -d rexdb,dfam-deep
+# Add the deeper Dfam collections (dfam-extended < dfam-deep < dfam-complete), or everything
+TEsorter2 TElib.fa -db rexdb,dfam-deep
+TEsorter2 TElib.fa -db all
 
 # Choose engines: fastest (HMMER only), or BATH only, or the full default cascade
-tesorter2 sequences TElib.fa --stages hmmer
-tesorter2 sequences TElib.fa --stages bath
-tesorter2 sequences TElib.fa --stages nail,hmmer,bath
+TEsorter2 TElib.fa --stages hmmer
+TEsorter2 TElib.fa --stages bath
+TEsorter2 TElib.fa --stages nail,hmmer,bath
 
 # Protein input
-tesorter2 sequences proteins.fa -st prot -d rexdb
+TEsorter2 proteins.fa -st prot -db rexdb
+
+# TEsorter's domain filters (defaults shown)
+TEsorter2 TElib.fa -cov 20 -eval 1e-3 -prob 0.5 -score 0.1
 
 # Pass-2 (similarity rescue of unclassified sequences): skip it, or use minimap2
-tesorter2 sequences TElib.fa -dp2
-tesorter2 sequences TElib.fa --pass2-aligner minimap2 -rule 80-80-80
+TEsorter2 TElib.fa -dp2
+TEsorter2 TElib.fa --pass2-aligner minimap2 -rule 80-80-80
 
 # Add a database to a finished run without searching everything again
-tesorter2 sequences TElib.fa --extend TElib.fa.TEsorter2/TElib.fa.db -d dfam-extended
+TEsorter2 TElib.fa --extend TElib.fa.TEsorter2.db -db dfam-extended
 
-# Output location and name
-tesorter2 sequences TElib.fa -o results/ --prefix mylib
+# Output name and location; temporary files
+TEsorter2 TElib.fa -pre results/mylib -tmp /scratch/tmp
 ```
 
-Run `tesorter2 sequences -h` or `tesorter2 genome -h` for the full list.
+Run `TEsorter2 -h` for the full list.
 
 ## Choosing an engine
 
@@ -141,7 +165,7 @@ Run `tesorter2 sequences -h` or `tesorter2 genome -h` for the full list.
 |---|---|
 | Recent, intact elements (e.g. a fresh EDTA / RepeatModeler library) | default, or `--stages hmmer` for maximum speed |
 | Old, diverged or fragmented copies | default cascade with BATH installed |
-| Whole assembly | `tesorter2 genome` (BATH) |
+| Whole assembly | `-genome` (BATH) |
 
 In the default cascade each engine only searches what the previous ones left unclassified, so
 BATH, the slowest and most sensitive, sees a small remainder. DNA databases (SINE, Dfam) are
@@ -149,11 +173,14 @@ always searched with nhmmer.
 
 ## Output files
 
+`{prefix}` is `-pre`, by default `{input}.{db}` with one database and `{input}.TEsorter2` with several.
+
 | File | Content |
 |---|---|
 | `{prefix}.cls.tsv` | Combined call per sequence across databases and pass-2, with `SecondaryHits`, `SO_name`, `SO_ID` |
-| `{prefix}.{db}.cls.tsv` | Per-database call in TEsorter's original 7-column format (never harmonized) |
-| `{prefix}.{db}.cls.lib` | Per-database RepeatMasker library (`>id#Order/Superfamily`) |
+| `{prefix}.cls.lib` | RepeatMasker library of the combined calls (`>id#Order/Superfamily/Clade`) |
+| `{prefix}.{db}.cls.tsv` | Several databases: per-database call in TEsorter's original 7-column format (never harmonized) |
+| `{prefix}.{db}.cls.lib` | Several databases: per-database RepeatMasker library |
 | `{prefix}.db` | SQLite database with every hit and call, for re-analysis without re-searching |
 | `{prefix}.dom.gff3` | Genome mode: classified TE domain features |
 | `{prefix}.dom.fna` | Genome mode: sequence of each feature |

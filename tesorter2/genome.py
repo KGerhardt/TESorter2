@@ -174,7 +174,7 @@ def _parse_model(model, config):
 # Per-hit -> genomic feature
 # ---------------------------------------------------------------------------
 
-def _hit_to_feature(h, engine, config):
+def _hit_to_feature(h, engine, config, filters=None):
     """Turn one passing domain hit into a GFF feature tuple, classified on its
     own. Returns (feature_tuple, classification_string) or None.
 
@@ -195,8 +195,11 @@ def _hit_to_feature(h, engine, config):
         dom_score = h["score"]
     norm_score = dom_score / model_len
     hmm_cov = 100.0 * (h["hmm_to"] - h["hmm_from"] + 1) / model_len
-    if not (hmm_cov >= MIN_COV and h["evalue"] <= MAX_EVALUE
-            and h["acc"] >= MIN_ACC and norm_score >= MIN_NORM_SCORE):
+    f = filters or {}
+    if not (hmm_cov >= f.get("min_cov", MIN_COV)
+            and h["evalue"] <= f.get("max_evalue", MAX_EVALUE)
+            and h["acc"] >= f.get("min_acc", MIN_ACC)
+            and norm_score >= f.get("min_norm_score", MIN_NORM_SCORE)):
         return None
 
     gene, clade = _parse_model(model, config)
@@ -362,13 +365,19 @@ def _search_nhmmer(db_path, db_name, input_fasta, outdir, n_workers):
 # ---------------------------------------------------------------------------
 
 def run_genome(input_fasta, db_paths, db_alphabets, outdir, prefix,
-               n_workers=4):
+               n_workers=4, filters=None, workdir=None):
     """Run genome mode end-to-end. db_paths/db_alphabets keyed by db name.
 
     Amino-acid databases find TE protein domains with BATH; DNA-alphabet
     databases (e.g. sine) find non-coding elements directly with nhmmer. A
     single run may mix both; both engines map back to the same genomic feature
-    space and the outputs are merged."""
+    space and the outputs are merged.
+
+    filters overrides the domain thresholds (min_cov, max_evalue, min_acc,
+    min_norm_score; TEsorter's -cov/-eval/-prob/-score). Engine output goes to
+    workdir, outdir when not given."""
+    workdir = workdir or outdir
+    os.makedirs(workdir, exist_ok=True)
     t_start = time.time()
 
     aa_dbs = [n for n, a in db_alphabets.items() if a == AMINO_ALPHABET]
@@ -401,14 +410,14 @@ def run_genome(input_fasta, db_paths, db_alphabets, outdir, prefix,
             name, os.path.basename(db_path), engine))
         t0 = time.time()
         if engine == "nhmmer":
-            hits = _search_nhmmer(db_path, name, input_fasta, outdir, n_workers)
+            hits = _search_nhmmer(db_path, name, input_fasta, workdir, n_workers)
         else:
-            hits = _search_bath(input_fasta, db_path, name, n_workers, outdir)
+            hits = _search_bath(input_fasta, db_path, name, n_workers, workdir)
         log.info("  Search done in {:.1f}s".format(time.time() - t0))
 
         n_pass = 0
         for h in hits:
-            result = _hit_to_feature(h, engine, config)
+            result = _hit_to_feature(h, engine, config, filters)
             if result is not None:
                 all_features.append(result[0])
                 n_pass += 1

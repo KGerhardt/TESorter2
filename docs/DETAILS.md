@@ -6,7 +6,7 @@ The practical guide is the [README](../README.md). This page explains how TEsort
 
 The HMM databases (REXdb, GyDB2, LINE, TIR, AnnoSINE, a Pfam-derived TE set and four Dfam curated
 collections) ship inside the package, as they do in TEsorter, so there is no download step and no
-configuration: `tesorter2 sequences input.fasta` works straight after install.
+configuration: `TEsorter2 input.fasta` works straight after install.
 
 The Dfam collections ship gzipped. An HMM file is text and gives back ~84% of its size, and nothing
 has to unpack them: pyHMMER's `HMMFile` detects gzip, and HMMER's `nhmmer` reads a `.gz` path
@@ -23,20 +23,23 @@ and concurrent jobs sharing one install cannot race over a half-written file.
 To use a custom collection of HMM databases instead, point TEsorter2 at its directory:
 
 ```bash
-tesorter2 sequences input.fasta --db-dir /path/to/db   # or: export TESORTER2_DB=/path/to/db
+TEsorter2 input.fasta --db-dir /path/to/db   # or: export TESORTER2_DB=/path/to/db
 ```
 
-Individual databases can also be passed by path: `-d /path/to/custom.hmm`.
+Individual databases can also be passed by path: `-db /path/to/custom.hmm` or, as in TEsorter,
+`--db-hmm /path/to/custom.hmm`. A custom file is read with the classifier of the bundled database
+whose name its file name contains (`my_gydb.hmm` reads as GyDB), otherwise with REXdb's naming
+convention.
 
 ## Two modes
 
-The mode is a verb, because what the input *is* decides nearly everything downstream — which
-engines can run, whether there is a per-element classification at
-all:
+What the input *is* decides nearly everything downstream: which engines can run, and whether there
+is a per-element classification at all. As in TEsorter, element mode is the default and `-genome`
+selects genome mode:
 
 ```bash
-tesorter2 sequences lib.fa      # pre-extracted TE sequences -> per-element classifications
-tesorter2 genome    asm.fa      # whole assembly -> domain-level GFF3 + summary
+TEsorter2 lib.fa                # pre-extracted TE sequences -> per-element classifications
+TEsorter2 asm.fa -genome        # whole assembly -> domain-level GFF3 + summary
 ```
 
 
@@ -56,7 +59,7 @@ remainder. Naming a single engine (`--stages hmmer`, `--stages bath`) runs that 
 - **hmmer**: pyHMMER `hmmsearch` over six-frame translations, in-process.
 - **bath**: `bathsearch --fs` on the nucleotide sequence (see below).
 
-| | `sequences` mode (pre-extracted TEs) | `genome` mode (assembly) |
+| | element mode (pre-extracted TEs) | genome mode (`-genome`, assembly) |
 |---|---|---|
 | **Intact / low-divergence sequence** | **pyHMMER** : fastest | **BATH** (only engine) |
 | **Degraded / frameshifted copies** | **BATH** : slower than pyHMMER, more sensitive | **BATH** (only engine) : both faster *and* more sensitive |
@@ -123,7 +126,7 @@ recovered as a single hit with its true extent. No six-frame translation is perf
   suffix, matching the HMMER convention.
 - The only protein engine in genome mode.
 
-### Genome mode (`tesorter2 genome`)
+### Genome mode (`-genome`)
 
 Treats the input as whole-genome sequence rather than pre-extracted elements: detects TE protein
 domains throughout, classifies **each domain individually**, resolves overlapping features, and
@@ -147,9 +150,9 @@ Requires at least one database.
 
 ## Multiple databases
 
-**Most bundled databases are searched by default.** Omitting `-d` searches rexdb, gydb, line, tir,
-sine, sine-animals, pfam-te and dfam-core; pass `-d rexdb,gydb` to restrict the set, or
-`--max-search` to force every alias including the ones that are off by default (the
+**Most bundled databases are searched by default.** Omitting `-db` searches rexdb, gydb, line, tir,
+sine, sine-animals, pfam-te and dfam-core; pass `-db rexdb,gydb` to restrict the set, or
+`-db all` to force every alias including the ones that are off by default (the
 deeper Dfam collections). Each primary database classifies independently and reconciliation resolves
 them afterwards, so more databases means more evidence rather than more ambiguity — at
 proportionally more compute.
@@ -164,7 +167,7 @@ evidence where it speaks, so a DNA consensus model is never given the chance to 
 fills gaps. The layer runs before BLAST pass-2, so the weaker nucleotide-similarity pass sees only
 what profile evidence could not reach.
 
-The aliases are **hierarchical**: `-d dfam-deep` searches `dfam-core`, `dfam-extended` and
+The aliases are **hierarchical**: `-db dfam-deep` searches `dfam-core`, `dfam-extended` and
 `dfam-deep`. The files themselves are disjoint, so nothing is searched twice.
 
 Each collection is the previous one plus the next tranche of models, ordered by measured cost per
@@ -197,7 +200,7 @@ for the original 7-column format.
 > `cleanup_misclas.pl` first — it knows `pararetrovirus` but not `Caulimoviridae` or `Bel-Pao`.
 
 Harmonization is gated on at least two databases voting on an element: a single-database run keeps
-native names throughout, so `-d rexdb` alone is unaffected. The two tables driving stages 2 and 3
+native names throughout, so `-db rexdb` alone is unaffected. The two tables driving stages 2 and 3
 are `tesorter2/database/clade_harmonization.tsv` (mapping) and `clade_scope.tsv` (which superfamily
 each database can resolve at lineage level). The REXdb↔GyDB lineage equivalences — `Ale`/`Retrofit`,
 `Ivana`/`Oryco`, `Tekay`/`Del`, `SIRE`, `Tork`, `Reina`, `CRM`, `Galadriel`, `Athila` — are asserted
@@ -255,31 +258,47 @@ original behaviour.
 ## CLI reference
 
 ```
-tesorter2 sequences <fasta> [options]     # per-element classification
-tesorter2 genome    <fasta> [options]     # domain-level GFF3 of an assembly
-TEsorter            <fasta> [options]     # TEsorter-compatible command line
+TEsorter2 <fasta> [options]               # also installed as tesorter2
+TEsorter  <fasta> [options]               # TEsorter's own pipeline
 ```
 
-The older flag form (`tesorter2 lib.fa`, `tesorter2 asm.fa --genome`) still works and warns.
+The command line is TEsorter's, plus TEsorter2's own options. No mode has to be named: element
+classification is the default and `-genome` switches to genome mode. Output files go beside
+`-pre`, which defaults to `{input}.{db}` with one database (TEsorter's naming) and to
+`{input}.TEsorter2` with several, in the working directory.
+
+TEsorter's options:
 
 | Flag | Default | Description |
 |---|---|---|
-| `-d`, `--database` | all bundled except the deeper Dfam | Comma-separated database aliases or paths |
-| `--max-search` | off | Search every database alias, including those off by default |
-| `-o`, `--outdir` | `{input}.TEsorter2` | Output directory |
-| `--prefix` | input basename | Output file prefix |
-| `--db-dir` | bundled | Directory holding the HMM databases (or `TESORTER2_DB`) |
-| `-p`, `--processors` | `4` | Processors |
-| `--mask-stops` | off | Translate stop codons as `X` instead of `*`, letting profiles align through premature stops |
+| `-db`, `--hmm-database` | all bundled except the deeper Dfam (`TEsorter`: `rexdb`) | Database name, HMM file, comma-separated list, or `all`. TEsorter's names are accepted: `rexdb-plant`, `rexdb-metazoa` and the v3 names search the bundled REXdb (plant v4.0 + metazoa v3.1), `rexdb-pnas` is `tir`, `rexdb-line` is `line` |
+| `--db-hmm` | none | Custom HMM file, used instead of `-db` |
 | `-st`, `--seq-type` | `nucl` | `prot` for amino-acid input: no six-frame translation, no BATH, DNA databases skipped |
+| `-pre`, `--prefix` | `{input}.{db}` / `{input}.TEsorter2` | Output prefix, may include a directory |
+| `-p`, `--processors` | `4` | Processors |
+| `-tmp`, `--tmp-dir` | `./tmp-{random id}` | Temporary files; removed at the end unless `-nocln` |
+| `-cov`, `-eval`, `-prob`, `-score` | `20`, `1e-3`, `0.5`, `0.1` | Domain filters: HMM coverage (%), E-value, posterior probability, score per HMM position |
+| `-mask soft hard` | none | Write `{prefix}.softmasked` / `.hardmasked` with the TE domains masked. Needs domain coordinates: `-genome`, or the `TEsorter` command |
+| `-nocln`, `--no-cleanup` | cleanup **on** | Keep intermediates (partitions, translations, cascade handoffs, pass-2 scratch). A failed run always keeps them |
+| `-dp2`, `--disable-pass2` | off | Skip the pass-2 similarity search (`TEsorter` skips it for `-st prot`, as TEsorter did) |
+| `-rule`, `--pass2-rule` | `80-80-80` | Pass-2 threshold, identity-coverage-length |
+| `-nolib`, `-norc` | off | No RepeatMasker library; do not reverse-complement minus-strand sequences in it |
+| `-genome` | off | Genome mode |
+| `-fw`, `-win_size`, `-win_ovl` | | Accepted and ignored: there is no hmmscan output to reuse, and genome mode searches each chromosome whole |
+| `-cite`, `-v` | | Print the citation / version and exit |
+
+TEsorter2's options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `-o`, `--outdir` | directory of `-pre` | Output directory; a relative `-pre` is placed inside it |
+| `--db-dir` | bundled | Directory holding the HMM databases (or `TESORTER2_DB`) |
+| `--mask-stops` | off | Translate stop codons as `X` instead of `*`, letting profiles align through premature stops |
 | `--stages` | `nail,hmmer,bath` | Engine cascade for amino-acid databases (see above) |
 | `--no-partition` | partitioning **on** | Search the input as one unit instead of one balanced group per processor (partitioning is 4.6x faster on 135k sequences over 64 cores) |
 | `--memory-db` | off | Build the results database in RAM and copy it out once at the end |
-| `--extend DB` | off | Add the `-d` databases to a finished run's results database; vote, pass-2 and outputs are redone |
-| `-nocln`, `--no-cleanup` | cleanup **on** | Keep intermediates (partitions, translations, cascade handoffs, pass-2 scratch). A failed run always keeps them |
+| `--extend DB` | off | Add the `-db` databases to a finished run's results database; vote, pass-2 and outputs are redone |
 | `--emit-timing` | off | Write `cascade_timing.tsv` and `stage_timing.tsv`. Diagnostic |
-| `-dp2`, `--disable-pass2` | off | Skip the pass-2 similarity search |
-| `-rule`, `--pass2-rule` | `80-80-80` | Pass-2 threshold, identity-coverage-length |
 | `--pass2-aligner` | `blast` | `blast` (blastn, or blastp for `-st prot`) or `minimap2` |
 | `--blast-task` | `megablast` | `dc-megablast` is slower but more sensitive to diverged matches |
 | `--pass2-classified-fasta` | none | Extra classified elements (`>id#Order/Superfamily/Clade`) for the pass-2 target pool |
@@ -289,10 +308,14 @@ The older flag form (`tesorter2 lib.fa`, `tesorter2 asm.fa --genome`) still work
 | `--compat-tesorter-voting` | off | Raw domain-count clade vote (TEsorter behaviour) |
 | `--compat-tesorter-rounding` | off | Round normalized scores to 2 dp before filtering (replicates a TEsorter bug) |
 | `--compat-tesorter-output` | off | Combined `.cls.tsv` in TEsorter's 7-column format |
-| `--no-tesorter-outputs` | off | Skip the TEsorter companion files (`.cls.lib`, `.cls.pep`, `.dom.*`) |
-| `-nolib`, `-norc` | off | No RepeatMasker library; do not reverse-complement minus-strand sequences in it |
+| `--no-tesorter-outputs` | off | Skip the per-database RepeatMasker libraries |
 
-`genome` mode accepts `-d`, `--max-search`, `-o`, `--prefix`, `--db-dir`, `-p` and `--mask-stops`.
+The 2.0.0 spellings still work for existing scripts but are not listed in `-h`: the subcommand
+words (`tesorter2 sequences lib.fa`, `tesorter2 genome asm.fa`), `-d`/`--database` for `-db`,
+`--max-search` for `-db all`, and `--genome` for `-genome`.
+
+Genome mode uses `-db`, `--db-hmm`, `-pre`, `-o`, `-tmp`, `--db-dir`, `-p`, the
+domain filters and `-mask`; the element-mode options are ignored there.
 
 ## Pass-2 similarity search
 
@@ -315,23 +338,27 @@ MCC ≈ 0.857. The `blast_hits` table of the results database stores one row per
 
 ## TEsorter compatibility
 
-`TEsorter` (also installed as `tesorter2-compat`) provides a drop-in CLI with TEsorter's original argument names and
-defaults (including count-based clade voting), for substituting TEsorter inside existing pipelines:
+`TEsorter2` takes TEsorter's command line, so a TEsorter command keeps working when only the
+executable name changes; it runs the TEsorter2 search with TEsorter's file names. Where results
+must match TEsorter 1 exactly, `TEsorter` runs TEsorter's own pipeline: one database (rexdb by default), HMMER on the
+six-frame translation, TEsorter's filters and count-based clade voting:
 
 ```bash
 TEsorter input.fasta -db rexdb -p 16 -pre out
 ```
 
-Supported: `-db/--hmm-database`, `--db-hmm`, `-st/--seq-type`, `-pre/--prefix`, `-p/--processors`,
-`-tmp/--tmp-dir`, `-cov/--min-coverage`, `-eval/--max-evalue`, `-prob/--min-probability`,
-`-score/--min-score`, `-dp2/--disable-pass2`, `-nolib/--no-library`, `-norc/--no-reverse`,
-`-nocln/--no-cleanup`, plus the pass-2 options `-rule`, `--pass2-aligner`, `--pass2-classified-fasta` and `--minimap2-extra`. Output file names follow TEsorter (`{input}.{db}.cls.tsv`, `.cls.lib`, `.cls.pep`, `.dom.gff3`, `.dom.tsv`, `.dom.faa`), so EDTA can call it unchanged.
+Every TEsorter 1 option is accepted (table above). Output file names follow TEsorter
+(`{input}.{db}.cls.tsv`, `.cls.lib`, `.cls.pep`, `.dom.gff3`, `.dom.tsv`, `.dom.faa`, and
+`.softmasked`/`.hardmasked` with `-mask`), so EDTA can call it unchanged. With `-genome` it runs
+TEsorter2's genome mode on the one database, under TEsorter's genome-mode names.
 
 ## Architecture
 
 ### Core
 
-- **`pipeline.py`** — CLI and search orchestration
+- **`cli.py`** — the command line shared by `TEsorter2` and `TEsorter`
+- **`pipeline.py`** — search orchestration
+- **`tesorter_compat.py`** — TEsorter's own pipeline (the `TEsorter` command)
 - **`search.py`** — HMM search engine with balanced parallelism
 - **`sequence.py`** — FASTA ingestion (pyfastx) and six-frame translation (pyhmmer)
 - **`hmm.py`** — HMM loading, alphabet detection, optimized profile construction

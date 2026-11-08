@@ -515,7 +515,7 @@ def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
                 compat_voting=False, aa_fasta=None, mask_stops=False,
                 min_clade_delta=0.0, seq_type="nucl",
                 search_space_mb=None, evalue_scale=1.0, seq_index=None,
-                dna_level=0):
+                dna_level=0, filters=None):
     """Run the cascade level by level. Returns {db_name: [results]}.
 
     **A level is every database, then deconfliction, then the next level.**
@@ -684,7 +684,8 @@ def run_cascade(conn, input_fasta, db_paths, db_alphabets, outdir,
                     arrays, DB_CONFIGS[db_name],
                     compat_rounding=compat_rounding,
                     compat_voting=compat_voting,
-                    min_clade_delta=min_clade_delta)
+                    min_clade_delta=min_clade_delta,
+                    filters=filters)
                 for r in stage_results:
                     r["engine"] = engine.name
                     r["stage"] = level

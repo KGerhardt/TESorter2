@@ -6,27 +6,25 @@ cascade (hierarchical_search) -> cross-database reconciliation -> BLAST pass-2
 -> SQLite + TSV output.
 
 Engine selection lives entirely in --stages. There is no second way in: the
-cascade runs for every `sequences` run, and a single-engine run is the stage
+cascade runs for every element-mode run, and a single-engine run is the stage
 list with one name in it.
 """
 
-import argparse
 import logging
 import os
-import sys
 import time
 
-from . import __version__
+from . import cli
 from .paths import get_db_dir
 from .hmm import peek_alphabet, AMINO_ALPHABET, DNA_ALPHABET
 from .sequence import open_input, looks_nucleotide
 from .results import create_db, store_sequences, finalize_db
 from .classifier import (export_classification_tsv, store_classifications,
-                       reconcile_classifications, vote_tier)
+                       reconcile_classifications, vote_tier, DB_CONFIGS)
 from .blast_pass2 import blast_pass2
 from .minimap import minimap2_version
 from .subset import subset_fasta
-from .hierarchical_search import ENGINES, DEFAULT_STAGES
+from .hierarchical_search import DEFAULT_STAGES
 
 
 logging.basicConfig(
@@ -113,221 +111,36 @@ def resolve_db(name, db_dir=None):
     raise FileNotFoundError(f"Database '{name}' not found (not a file or known alias)")
 
 
-# Subcommands. The mode is the verb: what the input *is* decides almost
-# everything downstream -- which engines can run, whether there is a
-# per-element classification at all -- so it reads
-# better as a mode than as a flag hung off a single command.
-MODES = ("sequences", "genome")
-
-
-def _add_shared(p):
-    """Options meaningful in both modes."""
-    p.add_argument("sequence", help="Input FASTA")
-    p.add_argument(
-        "-d", "--database", default=None,
-        help="Comma-separated list of database names or paths "
-             f"(aliases: {', '.join(DB_ALIASES.keys())}). "
-             "[default: every bundled database except dfam-extended, "
-             "dfam-deep and dfam-complete]")
-    p.add_argument("--max-search", action="store_true", default=False,
-                   help="Search against all known databases. This is the "
-                        "default when -d is omitted; the flag still forces the "
-                        "full set alongside an explicit -d.")
-    p.add_argument("-o", "--outdir", default=None,
-                   help="Output directory [default: {input}.TEsorter2]")
-    p.add_argument("--prefix", default=None,
-                   help="Output file prefix [default: basename of input]")
-    p.add_argument("--db-dir", default=None,
-                   help="Directory containing the HMM databases "
-                        "[default: the databases bundled with the package]")
-    p.add_argument("-p", "--processors", type=int, default=4,
-                   help="Processors to use [default: 4]")
-    p.add_argument("--mask-stops", action="store_true", default=False,
-                   help="Six-frame translate stop codons as 'X' (unknown "
-                        "residue) rather than '*' (terminator), letting a "
-                        "profile align through a premature stop instead of "
-                        "being cut short by it. Recovers domains in degraded "
-                        "copies, but covers only the in-frame part of what "
-                        "BATH does and its false-positive cost is not yet "
-                        "characterized.")
-
-
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
-        prog="tesorter2",
-        description="Fast TE classification using HMM profile databases.")
-    parser.add_argument("--version", action="version",
-                        version="TEsorter2 " + __version__)
-    sub = parser.add_subparsers(dest="mode", metavar="{sequences,genome}")
+    """TEsorter's command line plus TEsorter2's options (see cli.py)."""
+    return cli.parse_args(argv, prog="TEsorter2", aliases=DB_ALIASES)
 
-    # ---- tesorter2 sequences ----
-    seq = sub.add_parser(
-        "sequences", help="Classify pre-extracted TE sequences",
-        description="Classify pre-extracted TE/LTR sequences. Emits a "
-                    "per-element classification per database, a reconciled "
-                    "combined call, and a BLAST pass-2 over whatever no "
-                    "database classified.")
-    _add_shared(seq)
-    # Partitioning and the in-memory results database belong to this mode only.
-    # Genome mode dispatches to the domain scanner and returns before any of
-    # the code they touch, so advertising them there would be a lie in --help.
-    seq.add_argument("--no-partition", dest="partition", action="store_false",
-                     default=True,
-                     help="Search the input as one unit instead of splitting "
-                          "it across independent single-threaded workers. "
-                          "Partitioning is on by default and uses one group "
-                          "per processor: most of a run's wall clock sits in "
-                          "nhmmer and nail, which parallelise over queries "
-                          "rather than targets, and splitting the targets is "
-                          "the other axis. On 135k sequences over 64 cores it "
-                          "is 4.6x faster. The cascade decides per sequence, "
-                          "so a group is independent and the results "
-                          "concatenate, and E-values are held on the whole "
-                          "input's scale so a verdict cannot depend on which "
-                          "group a sequence landed in. Use this flag to get "
-                          "the unpartitioned behaviour back.")
-    seq.add_argument("--memory-db", action="store_true", default=False,
-                     help="Build the results database in RAM and copy it to "
-                          "disk in one sequential pass at the end. Index "
-                          "creation is random-write, which is the worst case "
-                          "for the parallel filesystems cluster runs write "
-                          "to. Costs memory proportional to the hit count and "
-                          "loses the results if the run dies before "
-                          "finishing.")
-    seq.add_argument("--extend", default=None, metavar="DB",
-                     help="Add the -d databases to a finished run's results "
-                          "database instead of starting a new one. Databases "
-                          "it already searched are skipped (so -d "
-                          "dfam-extended adds only extended), the earlier "
-                          "calls are rebuilt from its stored hits, and the "
-                          "vote, BLAST pass-2 and every output are redone "
-                          "over old and new together. A new Dfam collection "
-                          "searches only what is still unclassified. Give "
-                          "the same input and classification options as the "
-                          "original run. Outputs go beside DB, named after "
-                          "it, unless -o/--prefix say otherwise.")
-    seq.add_argument("-nocln", "--no-cleanup", dest="cleanup",
-                     action="store_false", default=True,
-                     help="Keep intermediate files: partition FASTAs and "
-                          "their per-group results databases, six-frame "
-                          "translations, cascade handoffs, engine output and "
-                          "BLAST pass-2 scratch. By default a finished run "
-                          "leaves only the merged results database and the "
-                          "classification files. A run that fails keeps "
-                          "everything.")
-    seq.add_argument("--emit-timing", action="store_true", default=False,
-                     help="Write cascade_timing.tsv: wall and CPU time per "
-                          "round, partition group, database and cascade "
-                          "stage; and stage_timing.tsv: wall and CPU time "
-                          "per pipeline stage (search rounds, BLAST pass-2 "
-                          "and its steps, whole run). Diagnostic only.")
-    seq.add_argument(
-        "-st", "--seq-type", choices=("nucl", "prot"), default="nucl",
-        help="Alphabet of the input sequences. 'prot' takes amino acids "
-             "directly: no six-frame translation, no nucleotide-reading engine "
-             "(BATH), and DNA profile databases are skipped since nothing can "
-             "search them. [default: nucl]")
-    seq.add_argument(
-        "--stages", default=None,
-        help="Ordered, comma-separated engine cascade for amino-acid "
-             f"databases ({', '.join(sorted(k for k in ENGINES if k != 'nhmmer'))}). "
-             "Each stage searches only what earlier stages left unresolved, "
-             "per database, so a fast engine strips the easy majority and the "
-             "sensitive ones see a shrinking remainder. One name runs that "
-             "engine alone -- this is the only way to choose an engine. DNA "
-             "databases always use nhmmer, the only engine that reads DNA "
-             f"profiles. [default: {','.join(DEFAULT_STAGES)}; when --stages "
-             "is not given, a stage whose engine is not installed (BATH is "
-             "not on conda) is skipped with a warning. An explicit --stages "
-             "list fails instead.]")
-    seq.add_argument("--compat-tesorter-voting", action="store_true",
-                     default=False,
-                     help="Decide the clade by raw domain-count plurality, "
-                          "replicating TEsorter exactly. Default is a "
-                          "score-weighted clade vote.")
-    seq.add_argument("--compat-tesorter-rounding", action="store_true",
-                     default=False,
-                     help="Round normalized scores to 2 dp before threshold "
-                          "comparison, replicating a TEsorter rounding bug.")
-    seq.add_argument("--compat-tesorter-output", action="store_true",
-                     default=False,
-                     help="Emit the combined .cls.tsv in TEsorter's 7-column "
-                          "format, without SecondaryHits/SO/lineage.")
-    seq.add_argument("--no-tesorter-outputs", action="store_true",
-                     default=False,
-                     help="Skip the TEsorter-compatible companion files "
-                          "(.cls.lib, .cls.pep, .dom.gff3, .dom.tsv, .dom.faa).")
-    seq.add_argument("-nolib", "--no-library", action="store_true",
-                     default=False,
-                     help="Do not write the RepeatMasker library (.cls.lib).")
-    seq.add_argument("-norc", "--no-reverse", action="store_true",
-                     default=False,
-                     help="Do not reverse-complement minus-strand sequences "
-                          "when writing the .cls.lib library.")
-    seq.add_argument(
-        "--min-clade-delta", type=float, default=0.0, metavar="BITS",
-        help="Demote a clade call to 'mixture' when the vote could be "
-             "overturned by a per-hit score offset smaller than BITS. The "
-             "clade vote sums score/model_len, so a uniform offset favours "
-             "clades carried by short models; this is the margin the call can "
-             "absorb. Only the Clade field is affected -- Order and "
-             "Superfamily are never touched. 0 (the default) never demotes, "
-             "leaving classification "
-             "bit-for-bit unchanged. ~5.6 is the measured pyhmmer-to-BATH "
-             "offset, so that is the scale at which a call is engine-dependent.")
-    seq.add_argument(
-        "--emit-clade-delta", action="store_true", default=False,
-        help="Append a CladeDelta column to the per-database .cls.tsv with "
-             "that margin in bits ('inf' = only one clade in play). "
-             "Diagnostic only; does not change any call.")
-    # pass-2 options
-    seq.add_argument(
-        "-dp2", "--disable-pass2", action="store_true", default=False,
-        help="Skip pass-2 similarity search (HMM-only classification)")
-    seq.add_argument(
-        "-rule", "--pass2-rule", default="80-80-80", type=str, metavar="I-C-L",
-        help="Pass-2 threshold as identity-coverage-length. For the blast "
-             "aligner: pident, qcovs, and alignment-length filters. For "
-             "minimap2: I drives --min-pid; C drives BOTH --min-qcov and "
-             "--min-tcov; L is parsed for grammar compatibility but is not "
-             "used [default: %(default)s]")
-    seq.add_argument(
-        "--pass2-aligner", choices=["blast", "minimap2"], default="blast",
-        help="Aligner for the pass-2 similarity search. 'blast' (default) "
-             "uses blastn (blastp for -st prot) with qcovs + alignment-length "
-             "filters and clade=unknown; 'minimap2' uses the PAF qcov+tcov "
-             "path and inherits the best target's full classification "
-             "[default: %(default)s]")
-    seq.add_argument(
-        "--blast-task", choices=["megablast", "dc-megablast"],
-        default="megablast",
-        help="blastn -task for the 'blast' pass-2 aligner. dc-megablast is "
-             "slower but more sensitive to diverged matches. Ignored for "
-             "minimap2 and protein input [default: %(default)s]")
-    seq.add_argument(
-        "--pass2-classified-fasta", default=None, type=str, metavar="FASTA",
-        help="Optional FASTA of previously-classified elements to augment "
-             "the pass-2 target database. Headers must be like "
-             ">id#Order/Superfamily/Clade")
-    seq.add_argument(
-        "--minimap2-extra", default="", type=str, metavar="STR",
-        help="Extra flags passed through to minimap2 (advanced)")
-    # ---- tesorter2 genome ----
-    gen = sub.add_parser(
-        "genome", help="Annotate TE domains across a whole assembly",
-        description="Scan whole-genome sequence for TE domains. Searches "
-                    "each chromosome whole, classifies each domain "
-                    "occurrence individually, "
-                    "and emits a feature-level GFF3 + summary. No per-element "
-                    "classification and no BLAST pass-2. Protein profiles are "
-                    "searched with BATH (required); DNA profiles with stock "
-                    "HMMER nhmmer.")
-    _add_shared(gen)
 
-    args = parser.parse_args(_normalize_argv(argv))
-    if args.mode is None:
-        parser.error("a mode is required: %s" % " | ".join(MODES))
-    return args
+def _short_name(path):
+    """The name a custom HMM file goes by: its basename, minus .gz/.hmm."""
+    name = os.path.basename(path)
+    for ext in (".gz", ".hmm"):
+        name = name.removesuffix(ext)
+    return name
+
+
+def _register_custom_db(name):
+    """Give a custom HMM file a classifier config.
+
+    Model names decide how a hit is read, so the config of the bundled
+    database whose name the file's name contains is used (TEsorter's --db-hmm
+    behaves the same way), falling back to REXdb's naming convention.
+    """
+    if name in DB_CONFIGS:
+        return
+    for key, config in DB_CONFIGS.items():
+        if key in name.lower():
+            DB_CONFIGS[name] = config
+            log.info("Custom database %s: read with the %s config", name, key)
+            return
+    DB_CONFIGS[name] = DB_CONFIGS["rexdb"]
+    log.warning("Custom database %s: no bundled database name in it; reading "
+                "its model names with the REXdb convention", name)
 
 
 def _resolve_stages(stages_arg):
@@ -362,28 +175,18 @@ def _resolve_stages(stages_arg):
     return kept
 
 
-def _normalize_argv(argv):
-    """Accept the pre-subcommand form, so existing scripts keep working.
+def main(argv=None):
+    args = parse_args(argv)
 
-    `tesorter2 in.fa --genome ...` becomes `tesorter2 genome in.fa ...`, and a
-    bare `tesorter2 in.fa ...` becomes `tesorter2 sequences in.fa ...`.
-    """
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] in MODES or argv[0] in ("-h", "--help"):
-        return argv
-    if argv[0].startswith("-"):
-        return argv                      # let argparse report it
-    if "--genome" in argv:
-        log.warning("`--genome` is deprecated; use `tesorter2 genome ...`")
-        return ["genome"] + [a for a in argv if a != "--genome"]
-    log.warning("Assuming `tesorter2 sequences ...`; name the mode explicitly.")
-    return ["sequences"] + argv
-
-
-def main():
-    args = parse_args()
-
-    genome_mode = args.mode == "genome"
+    genome_mode = args.genome
+    if args.force_write_hmmscan:
+        log.info("-fw: TEsorter2 keeps no hmmscan output to reuse; searching")
+    if args.win_size is not None or args.win_ovl is not None:
+        log.info("-win_size/-win_ovl ignored: TEsorter2 searches each "
+                 "chromosome whole")
+    filters = dict(min_cov=args.min_coverage, max_evalue=args.max_evalue,
+                   min_acc=args.min_probability,
+                   min_norm_score=args.min_score)
 
     # Parse the pass-2 rule up front so a typo fails before the search runs.
     p2_id = p2_cov = p2_len = None
@@ -396,33 +199,40 @@ def main():
                 f"--pass2-rule must be I-C-L (three numbers separated by '-'), "
                 f"got {args.pass2_rule!r}")
 
-    # Resolve output directory and prefix. An extended run writes into the
-    # database it extends, and by default beside it under its name.
-    extending = getattr(args, "extend", None)
-    if extending and not args.database:
-        raise SystemExit("--extend needs -d: the databases to add")
-    input_base = os.path.basename(args.sequence)
-    if extending:
+    # Databases. -db takes TEsorter's names as well as TEsorter2's.
+    db_names, db_label = cli.database_names(args)
+    explicit = bool(db_names) and cli.ALL_DBS not in db_names
+
+    # Output names follow TEsorter: files go beside -pre, which defaults to
+    # {input}.{db} (or {input}.TEsorter2 for several databases), in the
+    # working directory. An extended run writes into the database it extends,
+    # and by default beside it under its name.
+    extending = args.extend
+    if extending and not db_names:
+        raise SystemExit("--extend needs -db: the databases to add")
+    if extending and args.prefix is None:
         outdir = args.outdir or os.path.dirname(os.path.abspath(extending))
-        prefix = args.prefix or os.path.basename(extending).removesuffix(".db")
+        prefix = os.path.basename(extending).removesuffix(".db")
     else:
-        outdir = args.outdir or f"{input_base}.TEsorter2"
-        prefix = args.prefix or input_base
+        outdir, prefix = cli.output_paths(args, db_label, args.sequence)
     os.makedirs(outdir, exist_ok=True)
+    # Intermediates live under -tmp, one directory per round.
+    tmp_dir = args.tmp_dir
+    tmp_existed = os.path.isdir(tmp_dir)
+    os.makedirs(tmp_dir, exist_ok=True)
 
     db_path_out = extending or os.path.join(outdir, f"{prefix}.db")
 
-    # Resolve databases. Omitting -d searches everything: each database
-    # classifies independently and reconciliation resolves them afterwards, so
-    # more databases is more evidence rather than more ambiguity.
-    if args.max_search:
-        # Literally everything, which is what the flag says. The default set
-        # below is deliberately smaller.
-        db_names = list(DB_ALIASES.keys())
-    elif not args.database:
+    # Omitting -db searches everything: each database classifies
+    # independently and reconciliation resolves them afterwards, so more
+    # databases is more evidence rather than more ambiguity.
+    if cli.ALL_DBS in db_names:
+        # Literally everything, which is what it says. The default set below
+        # is deliberately smaller.
+        db_names = list(DB_ALIASES.keys()) + [
+            n for n in db_names if n != cli.ALL_DBS and n not in DB_ALIASES]
+    elif not db_names:
         db_names = [k for k in DB_ALIASES.keys() if k not in NON_DEFAULT_DBS]
-    else:
-        db_names = [s.strip() for s in args.database.split(",")]
 
     # Expand hierarchical aliases, preserving order and dropping duplicates so
     # naming both dfam-core and dfam-deep searches core exactly once.
@@ -441,20 +251,30 @@ def main():
     # stop the run rather than silently narrow it. One that is merely on by
     # default must not: the Dfam collections are a large optional download, and
     # an installation without them should still run, just without that layer.
-    explicit = bool(args.database) and not args.max_search
+    # A custom HMM file goes by its short name, so its outputs and its row in
+    # the results database read like a bundled one's.
     db_dir = get_db_dir(args.db_dir)
     db_paths = {}
     absent = []
+    named = []
     for name in db_names:
+        key = name
+        if name not in DB_ALIASES and os.path.isfile(name):
+            key = _short_name(name)
+            _register_custom_db(key)
         try:
-            db_paths[name] = resolve_db(name, db_dir=db_dir)
+            db_paths[key] = resolve_db(name, db_dir=db_dir)
+            named.append(key)
         except FileNotFoundError:
             if explicit:
-                raise
+                raise SystemExit(
+                    f"Database '{name}' not found: not a file, and not one of "
+                    f"{', '.join(dict.fromkeys([*cli.TESORTER_DB_NAMES, *DB_ALIASES]))}"
+                    f" under {db_dir}")
             absent.append(name)
     if absent:
         log.warning("Not installed, skipping: %s", ", ".join(absent))
-        db_names = [n for n in db_names if n not in absent]
+    db_names = named
     if not db_names:
         raise SystemExit(
             f"No databases available under {db_dir}. Point --db-dir or "
@@ -462,8 +282,8 @@ def main():
 
     log.info(f"Input: {args.sequence}")
     log.info(f"Databases: {', '.join(db_names)}")
-    log.info(f"Output directory: {outdir}")
-    log.info(f"File prefix: {prefix}")
+    log.info(f"Output prefix: {os.path.join(outdir, prefix)}")
+    log.info(f"Temporary directory: {tmp_dir}")
 
     # Database alphabet decides the engines: AA databases run the --stages
     # cascade, DNA databases nhmmer.
@@ -481,10 +301,22 @@ def main():
         from . import genome
 
         log.info("Genome mode")
-        genome.run_genome(
+        gff, _, _ = genome.run_genome(
             args.sequence, db_paths, db_alphabets, outdir, prefix,
-            n_workers=args.processors)
+            n_workers=args.processors, filters=filters, workdir=tmp_dir)
+        if args.mask:
+            cli.mask_input(args.sequence, gff, os.path.join(outdir, prefix),
+                           args.mask)
+        if args.cleanup:
+            _remove_tmp(tmp_dir, tmp_existed)
         return
+
+    if args.mask:
+        log.warning("-mask needs domain coordinates, which the engine cascade "
+                    "does not produce for pre-extracted sequences (its hits "
+                    "come from several engines with different coordinate "
+                    "systems). Use -genome, or the TEsorter command, for masked "
+                    "output.")
 
     # Create results database. --memory-db keeps it in RAM until the end; see
     # backup_to for why that is not just a speed trick.
@@ -553,7 +385,7 @@ def main():
             "reload", 1, extend.reload_results, conn, len(nucl_lengths),
             compat_rounding=args.compat_tesorter_rounding,
             compat_voting=args.compat_tesorter_voting,
-            min_clade_delta=args.min_clade_delta)
+            min_clade_delta=args.min_clade_delta, filters=filters)
         log.info("  Rebuilt the calls of %d stored database(s): %s",
                  len(old_per_db), ", ".join(
                      "%s %d" % (n, len(r)) for n, r in old_per_db.items()))
@@ -641,17 +473,18 @@ def main():
         compat_voting=args.compat_tesorter_voting,
         mask_stops=args.mask_stops,
         min_clade_delta=args.min_clade_delta,
-        seq_type=args.seq_type)
+        seq_type=args.seq_type,
+        filters=filters)
 
     # A hit's `id` is its sequence's position in the input, so the map is the
     # same for every worker and every round.
     seq_index = {name: i for i, name in enumerate(nucl_lengths)}
 
-    # Every intermediate a round writes lives under outdir/<round>, whichever
+    # Every intermediate a round writes lives under tmp_dir/<round>, whichever
     # search path runs it, so cleanup is one directory per round and nothing
     # intermediate is ever written loose beside the results.
     def _workdir(tag):
-        path = os.path.join(outdir, tag)
+        path = os.path.join(tmp_dir, tag)
         os.makedirs(path, exist_ok=True)
         return path
 
@@ -746,8 +579,12 @@ def main():
             log.info("  Recovered %d sequences the primary arm left "
                      "unclassified", gained)
 
+    # One file per database, TEsorter's format, when there is more than one:
+    # with a single database the combined file below is that database's
+    # call (plus pass-2), exactly what TEsorter wrote under the same name.
+    single_db = len(per_db_results) <= 1
     for name, results in per_db_results.items():
-        if not results:
+        if not results or single_db:
             continue
         cls_tsv = os.path.join(outdir, f"{prefix}.{name}.cls.tsv")
         export_classification_tsv(
@@ -759,18 +596,11 @@ def main():
         # the six-frame translation, and a cascade's hits for one database can
         # come from several engines -- BATH reports nucleotide coordinates,
         # nail its own -- so there is no single frame to write them against.
-        if not args.no_tesorter_outputs:
-            from .tesorter_output import generate_all_outputs
-            generate_all_outputs(
-                conn, os.path.join(outdir, f"{prefix}.{name}"), name,
-                args.sequence, None, nucl_lengths, results,
-                seq_type=args.seq_type,
-                no_reverse=args.no_reverse,
-                no_library=args.no_library,
-                hits_table="legacy_hits",
-                domain_files=False,
-                keep=None,
-            )
+        if not args.no_tesorter_outputs and not args.no_library:
+            from .tesorter_output import generate_cls_lib
+            generate_cls_lib(args.sequence,
+                             os.path.join(outdir, f"{prefix}.{name}"),
+                             results, args.no_reverse)
 
     # --- BLAST pass-2 ---
     all_results = list(reconciled)
@@ -791,7 +621,7 @@ def main():
             min_identity=p2_id,
             min_coverage=p2_cov,
             min_length=p2_len,
-            outdir=outdir,
+            outdir=tmp_dir,
             pass2_classified_fasta=args.pass2_classified_fasta,
             minimap2_extra=args.minimap2_extra,
             aligner=args.pass2_aligner,
@@ -815,6 +645,11 @@ def main():
             include_lineage=not args.compat_tesorter_output,
         )
         log.info(f"  Combined: {len(all_results)} classified -> {combined_tsv}")
+    # TEsorter's RepeatMasker library, over the combined calls and pass-2.
+    if not args.no_library:
+        from .tesorter_output import generate_cls_lib
+        generate_cls_lib(args.sequence, os.path.join(outdir, prefix),
+                         all_results, args.no_reverse)
 
     # TODO: rewrite exports with numpy for large datasets
     # Flat file exports temporarily disabled -- results are in the SQLite db
@@ -875,7 +710,7 @@ def main():
     # point keeps every intermediate for diagnosis.
     from .partition import remove_path
     if args.emit_timing:
-        _collect_timing(outdir, rounds_run)
+        _collect_timing(outdir, rounds_run, tmp_dir)
         stage_rows.append(("total", time.time() - t_start,
                            _cpu_now() - c_start, args.processors))
         _write_stage_timing(outdir, stage_rows, n_groups or 0)
@@ -885,8 +720,9 @@ def main():
         remove_path(os.path.join(outdir, "stage_timing.tsv"))
     if args.cleanup:
         for d in ("primary", "subordinate", "blast_pass2"):
-            remove_path(os.path.join(outdir, d))
-        log.info("Removed intermediate files (--no-cleanup keeps them)")
+            remove_path(os.path.join(tmp_dir, d))
+        _remove_tmp(tmp_dir, tmp_existed)
+        log.info("Removed intermediate files (-nocln keeps them)")
 
     t_end = time.time()
     log.info(f"Done in {t_end - t_start:.1f}s")
@@ -910,7 +746,18 @@ def _write_stage_timing(outdir, rows, n_groups):
                      f"\t{n_groups}\n")
 
 
-def _collect_timing(outdir, rounds):
+def _remove_tmp(tmp_dir, existed):
+    """Remove the temporary directory if this run created it, as TEsorter does.
+
+    A -tmp the user pointed at an existing directory is theirs: only what the
+    run wrote in it is removed (by the caller), never the directory.
+    """
+    if not existed:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _collect_timing(outdir, rounds, workroot=None):
     """One cascade_timing.tsv at the top of outdir, every round and group.
 
     Each round writes its own table under outdir/<round>; a partitioned round
@@ -923,7 +770,7 @@ def _collect_timing(outdir, rounds):
         os.remove(top)                 # a previous run's, in a reused outdir
     out_rows, header = [], None
     for rnd in rounds:
-        path = os.path.join(outdir, rnd, "cascade_timing.tsv")
+        path = os.path.join(workroot or outdir, rnd, "cascade_timing.tsv")
         if not os.path.exists(path):
             continue
         with open(path) as fh:

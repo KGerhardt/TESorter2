@@ -33,12 +33,12 @@ start searching immediately even though the image is read-only.
 # Docker: mount the working directory, run as your own user so the
 # outputs are not owned by the container's user
 docker run --rm -u $(id -u):$(id -g) -v "$PWD":/data tesorter2:2.0.0 \
-    tesorter2 sequences TEs.fa -p 8
+    TEsorter2 TEs.fa -p 8
 
-# TEsorter-compatible command line (as called by EDTA)
+# TEsorter's own pipeline (as called by EDTA)
 docker run --rm -u $(id -u):$(id -g) -v "$PWD":/data tesorter2:2.0.0 \
     TEsorter TEs.fa -db rexdb-plant -p 8
 
 # Apptainer
-apptainer exec tesorter2_2.0.0.sif tesorter2 sequences TEs.fa -p 8
+apptainer exec tesorter2_2.0.0.sif TEsorter2 TEs.fa -p 8
 ```

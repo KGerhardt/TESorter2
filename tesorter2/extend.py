@@ -126,7 +126,7 @@ def searched_databases(conn):
 
 
 def reload_results(conn, n_sequences, compat_rounding=False,
-                   compat_voting=False, min_clade_delta=0.0):
+                   compat_voting=False, min_clade_delta=0.0, filters=None):
     """Rebuild each searched database's calls from its stored hits.
 
     Returns ({database: [call, ...]}, {database: is_dna}). Calls are
@@ -176,7 +176,8 @@ def reload_results(conn, n_sequences, compat_rounding=False,
                 continue
             results = classify_sequences(
                 _arrays(g), DB_CONFIGS[db], compat_rounding=compat_rounding,
-                compat_voting=compat_voting, min_clade_delta=min_clade_delta)
+                compat_voting=compat_voting, min_clade_delta=min_clade_delta,
+                filters=filters)
             for r in results:
                 r["engine"] = engine
                 r["stage"] = stage
