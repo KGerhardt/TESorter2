@@ -1,0 +1,8 @@
+.git
+_regression
+tests
+container/*.sif
+**/__pycache__
+*.egg-info
+build
+dist

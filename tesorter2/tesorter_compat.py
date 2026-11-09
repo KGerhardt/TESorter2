@@ -1,20 +1,23 @@
 """
-tesorter_compat.py — TEsorter-compatible CLI entry point.
+tesorter_compat.py -- TEsorter's own pipeline: the `TEsorter` command.
 
-Accepts the same command-line arguments as TEsorter and produces
-output files in the same format and naming convention. Downstream
-tools that depend on TEsorter's output structure can use TEsorter2
-as a drop-in replacement.
+Same command line as TEsorter (cli.py) and the same output files under the
+same names: one database (rexdb by default), HMMER on the six-frame
+translation, TEsorter's filters and domain-count clade vote, BLAST pass-2,
+and .cls.tsv/.cls.lib/.cls.pep/.dom.gff3/.dom.tsv/.dom.faa. Pipelines that
+call TEsorter (EDTA, for one) can use it unchanged. -genome hands over to
+TEsorter2's genome mode, which writes TEsorter's genome-mode file names.
 
 Usage:
-    TEsorter input.fasta -db rexdb -p 4
-    TEsorter input.fasta -db rexdb -p 4 --facet
+    TEsorter input.fasta -db rexdb-plant -p 4
 """
 
-import argparse
 import logging
 import os
+import shutil
 import sys
+
+from . import cli
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,135 +25,44 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Map TEsorter -db aliases to our aliases
-DB_MAP = {
-    "rexdb":         "rexdb",
-    "rexdb-plant":   "rexdb",      # v4.0 plant-only (we use v4+metazoa)
-    "rexdb-metazoa": "rexdb",      # metazoa-only (subset, use full)
-    "gydb":          "gydb",
-    "rexdb-pnas":    "tir",
-    "rexdb-line":    "line",
-    "sine":          "sine",
-    # Deprecated v3 aliases -> map to current equivalents
-    "rexdb-v3":       "rexdb",
-    "rexdb-plantv3":  "rexdb",
-    "rexdb-metazoav3":"rexdb",
-}
+
+def main(argv=None):
+    from .pipeline import DB_ALIASES
+    args = cli.parse_args(argv, prog="TEsorter", classic=True,
+                          aliases=DB_ALIASES)
+    return run_classic(args)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        prog="TEsorter",
-        description="TEsorter2 running in TEsorter-compatible mode. "
-                    "Lineage-level classification of transposable elements "
-                    "using conserved protein domains.",
-    )
-    parser.add_argument("sequence", type=str,
-                        help="Input TE/LTR sequences in FASTA format [required]")
-    parser.add_argument("-db", "--hmm-database", type=str, default="rexdb",
-                        choices=list(DB_MAP.keys()),
-                        help="The database name used [default: rexdb]")
-    parser.add_argument("--db-hmm", type=str, default=None,
-                        help="Custom HMM database file (overrides -db)")
-    parser.add_argument("-st", "--seq-type", type=str, default="nucl",
-                        choices=["nucl", "prot"],
-                        help="'nucl' for DNA or 'prot' for protein [default: nucl]")
-    parser.add_argument("-pre", "--prefix", type=str, default=None,
-                        help="Output prefix [default: '{input}.{db}']")
-    parser.add_argument("-p", "--processors", type=int, default=4,
-                        help="Processors to use [default: 4]")
-    parser.add_argument("-tmp", "--tmp-dir", type=str, default=None,
-                        help="Directory for temporary files")
-    parser.add_argument("-cov", "--min-coverage", type=float, default=20,
-                        help="Minimum HMM coverage (0-100) [default: 20]")
-    parser.add_argument("-eval", "--max-evalue", type=float, default=1e-3,
-                        help="Maximum E-value [default: 1e-3]")
-    parser.add_argument("-prob", "--min-probability", type=float, default=0.5,
-                        help="Minimum posterior probability [default: 0.5]")
-    parser.add_argument("-score", "--min-score", type=float, default=0.1,
-                        help="Minimum normalized score [default: 0.1]")
-    parser.add_argument("-dp2", "--disable-pass2", action="store_true",
-                        default=False,
-                        help="Do not run pass-2 classification")
-    parser.add_argument("-rule", "--pass2-rule", type=str, default="80-80-80",
-                        metavar="I-C-L",
-                        help="Pass-2 threshold identity-coverage-length. "
-                             "blast: pident, qcovs, and alignment-length "
-                             "filters. minimap2: I drives "
-                             "classify_ltr_paf_fast --min-pid; C drives both "
-                             "--min-qcov and --min-tcov; L unused "
-                             "[default: 80-80-80]")
-    parser.add_argument("--pass2-aligner", choices=["blast", "minimap2"],
-                        default="blast",
-                        help="Aligner for the pass-2 similarity search. "
-                             "blast (default) reproduces TEsorter2 master's "
-                             "blastn pass-2; minimap2 uses the PAF qcov+tcov "
-                             "path [default: blast]")
-    parser.add_argument("--pass2-classified-fasta", type=str, default=None,
-                        metavar="FASTA",
-                        help="Optional FASTA of previously-classified elements "
-                             "to augment pass-2 target DB. Headers must be "
-                             "like >id#Order/Superfamily/Clade")
-    parser.add_argument("--minimap2-extra", type=str, default="",
-                        metavar="STR",
-                        help="Extra flags passed through to minimap2")
-    parser.add_argument("-nolib", "--no-library", action="store_true",
-                        default=False,
-                        help="Do not generate RepeatMasker library file")
-    parser.add_argument("-norc", "--no-reverse", action="store_true",
-                        default=False,
-                        help="Do not reverse complement minus-strand sequences")
-    parser.add_argument("-nocln", "--no-cleanup", action="store_true",
-                        default=False,
-                        help="Do not clean up temporary directory")
+def run_classic(args):
+    names, label = cli.database_names(args)
+    if cli.ALL_DBS in names or len(names) > 1:
+        raise SystemExit("TEsorter's pipeline searches one database; run "
+                         "TEsorter2 to search several")
+    if not names:
+        names, label = ["rexdb"], "rexdb"
+    db_arg = names[0]
+    db_name = label
+    if args.force_write_hmmscan:
+        log.info("-fw: TEsorter2 keeps no hmmscan output to reuse; searching")
 
-    # TEsorter2 extension
-    parser.add_argument("--facet", action="store_true", default=False,
-                        help="Use facet pre-screening for faster search "
-                             "(AA databases only)")
-
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    # Resolve database
-    if args.db_hmm:
-        db_arg = args.db_hmm
-        db_name = os.path.splitext(os.path.basename(args.db_hmm))[0]
-    else:
-        db_arg = DB_MAP.get(args.hmm_database, args.hmm_database)
-        db_name = args.hmm_database
-
-    # Resolve prefix
-    if args.prefix is None:
-        prefix = f"{os.path.basename(args.sequence)}.{db_name}"
-    else:
-        prefix = args.prefix
-
-    # Build output directory from prefix
+    prefix = os.path.join(*cli.output_paths(args, label, args.sequence))
     outdir = os.path.dirname(prefix) or "."
-    file_prefix = os.path.basename(prefix)
+    os.makedirs(outdir, exist_ok=True)
+    tmp_existed = os.path.isdir(args.tmp_dir)
+    os.makedirs(args.tmp_dir, exist_ok=True)
+    filters = dict(min_cov=args.min_coverage, max_evalue=args.max_evalue,
+                   min_acc=args.min_probability, min_norm_score=args.min_score)
 
-    log.info(f"TEsorter2 (TEsorter-compatible mode)")
+    log.info("TEsorter2 (TEsorter pipeline)")
     log.info(f"Input: {args.sequence}")
     log.info(f"Database: {db_name} -> {db_arg}")
     log.info(f"Prefix: {prefix}")
 
-    # Import and run the pipeline
-    # We need to set up sys.path if running from the src directory
-    src_dir = os.path.dirname(os.path.realpath(__file__))
-    if src_dir not in sys.path:
-        sys.path.insert(0, src_dir)
-
     from .hmm import peek_alphabet, load_hmms, AMINO_ALPHABET, DNA_ALPHABET
     from .search import build_sequence_block, legacy_search
     from .sequence import translate_fasta, open_input, clean_seq
-    from .results import (create_db, store_sequences, store_legacy, store_facet,
-                         index_hits_tables, finalize_db,
-                         FACET_STAGE_VERIFIED, FACET_STAGE_CROSS_FAMILY,
-                         FACET_STAGE_LEGACY_FALLBACK)
+    from .results import (create_db, store_sequences, store_legacy,
+                         finalize_db)
     from .classifier import (classify_sequences, export_classification_tsv,
                             store_classifications, DB_CONFIGS)
     from .blast_pass2 import blast_pass2
@@ -160,17 +72,34 @@ def main():
     t_start = time.time()
 
     # Resolve database path
-    from .pipeline import resolve_db, DB_ALIASES
+    from .pipeline import resolve_db
+    from .paths import get_db_dir
     try:
-        db_path = resolve_db(db_arg)
-    except FileNotFoundError:
-        if args.db_hmm:
-            db_path = args.db_hmm
-        else:
-            log.error(f"Database not found: {db_arg}")
-            sys.exit(1)
+        db_path = resolve_db(db_arg, db_dir=get_db_dir(args.db_dir))
+    except FileNotFoundError as e:
+        raise SystemExit(str(e))
+    if os.path.isfile(db_arg):
+        db_arg = db_name               # a custom file goes by its short name
 
     alphabet = peek_alphabet(db_path)
+
+    if args.genome:
+        from . import genome
+        if args.win_size is not None or args.win_ovl is not None:
+            log.info("-win_size/-win_ovl ignored: TEsorter2 searches each "
+                     "chromosome whole")
+        if DB_CONFIGS.get(db_arg) is None:
+            from .pipeline import _register_custom_db
+            _register_custom_db(db_arg)
+        gff, _, _ = genome.run_genome(
+            args.sequence, {db_arg: db_path}, {db_arg: alphabet}, outdir,
+            os.path.basename(prefix), n_workers=args.processors,
+            filters=filters, workdir=args.tmp_dir)
+        if args.mask:
+            cli.mask_input(args.sequence, gff, prefix, args.mask)
+        if args.cleanup and not tmp_existed:
+            shutil.rmtree(args.tmp_dir, ignore_errors=True)
+        return
 
     # Create output database
     db_out = f"{prefix}.db"
@@ -198,36 +127,10 @@ def main():
         seq_fasta = args.sequence
 
     # Search
-    if args.facet and alphabet == AMINO_ALPHABET:
-        from .facet_classify import facet_classify, export_classifications_tsv
-        from .cross_family import find_missing_families, search_missing
-
-        classifications, verified_hits, legacy_hits = facet_classify(
-            db_path, seq_block, seq_fasta, alphabet,
-            n_workers=args.processors)
-
-        if verified_hits:
-            store_facet(conn, verified_hits, db_arg, stage=FACET_STAGE_VERIFIED)
-
-        # Cross-family
-        hmms = load_hmms(db_path)
-        hmms_dict = {h.name: h for h in hmms}
-        missing, _ = find_missing_families(classifications, hmms_dict)
-        if missing:
-            cf_hits = search_missing(missing, hmms_dict, seq_block, alphabet)
-            if cf_hits:
-                store_facet(conn, cf_hits, db_arg,
-                            stage=FACET_STAGE_CROSS_FAMILY)
-
-        if legacy_hits:
-            store_facet(conn, legacy_hits, db_arg,
-                        stage=FACET_STAGE_LEGACY_FALLBACK)
-        run_mode = "facet"
-    else:
-        hmms = load_hmms(db_path)
-        hits = legacy_search(hmms, seq_block)
-        store_legacy(conn, hits, db_arg)
-        run_mode = "default"
+    hmms = load_hmms(db_path)
+    hits = legacy_search(hmms, seq_block)
+    store_legacy(conn, hits, db_arg)
+    run_mode = "default"
 
     # Classify
     config = DB_CONFIGS.get(db_arg)
@@ -238,17 +141,22 @@ def main():
                 config = v
                 break
 
-    # Build hits-table indexes before the classification reads
-    index_hits_tables(conn)
-
+    # No index build before the read below. This mode searches one database,
+    # so `WHERE database = ?` matches essentially every row and an index on
+    # that column only adds a rowid lookup per row. finalize_db builds them.
+    results = []
+    blast_cls = []
+    if config is None:
+        log.warning(f"No classifier config for {db_arg}; nothing classified")
     if config:
-        hits_table = "facet_hits" if run_mode == "facet" else "legacy_hits"
-        db_hits = load_hits(db_out, table=hits_table, database=db_arg)
+        db_hits = load_hits(db_out, table="legacy_hits", database=db_arg)
         if db_hits:
             # Drop-in TEsorter mode: keep raw domain-count clade voting so
             # output matches TEsorter exactly. The score-weighted vote is the
             # default only in the main pipeline.py CLI.
-            results = classify_sequences(db_hits, config, compat_voting=True)
+            results = classify_sequences(
+                db_hits, config, compat_voting=True,
+                filters=filters)
             store_classifications(conn, results, database=db_arg, mode=run_mode)
 
             # Export TEsorter-format cls.tsv
@@ -276,7 +184,7 @@ def main():
                     min_identity=p2_id,
                     min_coverage=p2_cov,
                     min_length=p2_len,
-                    outdir=args.tmp_dir or os.path.dirname(prefix) or ".",
+                    outdir=args.tmp_dir,
                     pass2_classified_fasta=args.pass2_classified_fasta,
                     minimap2_extra=args.minimap2_extra,
                     aligner=args.pass2_aligner,
@@ -292,7 +200,7 @@ def main():
     # Generate TEsorter-format output files
     if config and results:
         from .tesorter_output import generate_all_outputs
-        all_cls = results + (blast_cls if not args.disable_pass2 and 'blast_cls' in dir() else [])
+        all_cls = results + blast_cls
         generate_all_outputs(
             conn, prefix, db_arg, args.sequence,
             aa_fasta if alphabet == AMINO_ALPHABET and args.seq_type == "nucl" else None,
@@ -302,7 +210,21 @@ def main():
             no_library=args.no_library,
         )
 
+    if args.mask:
+        cli.mask_input(args.sequence, f"{prefix}.dom.gff3", prefix, args.mask,
+                       seq_type=args.seq_type)
+
     finalize_db(conn)
+
+    # -nocln keeps pass-2 scratch; by default remove it, as TEsorter does.
+    if args.cleanup:
+        shutil.rmtree(os.path.join(args.tmp_dir, "blast_pass2"),
+                      ignore_errors=True)
+        if not tmp_existed:
+            shutil.rmtree(args.tmp_dir, ignore_errors=True)
+        for f in (f"{prefix}.aa", f"{prefix}.aa.fxi"):
+            if os.path.exists(f):
+                os.remove(f)
 
     t_end = time.time()
     log.info(f"Done in {t_end - t_start:.1f}s")

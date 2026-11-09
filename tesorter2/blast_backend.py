@@ -194,11 +194,11 @@ def chunk_fasta(qry_fasta, n_chunks, outdir):
     try:
         handles = [open(p, "w") for p in chunk_paths]
         lengths = [0] * len(chunk_paths)
-        fa = pyfastx.Fasta(qry_fasta, build_index=True)
-        for rec in fa:
+        fa = pyfastx.Fasta(qry_fasta, build_index=False)
+        for name, seq in fa:
             i = lengths.index(min(lengths))
-            handles[i].write(f">{rec.name}\n{rec.seq}\n")
-            lengths[i] += len(rec.seq)
+            handles[i].write(f">{name}\n{seq}\n")
+            lengths[i] += len(seq)
     finally:
         for h in handles:
             h.close()
@@ -207,8 +207,8 @@ def chunk_fasta(qry_fasta, n_chunks, outdir):
 
 def run_pass2_blast(qry_fasta, db_fasta, conn, classifications, db_seq_to_dbs,
                     n_processors, min_identity, min_coverage, min_length, work,
-                    blast_task="megablast"):
-    """blastn pass-2 over an already-prepared (db_fasta, qry_fasta) pair.
+                    blast_task="megablast", seq_type="nucl"):
+    """blastn (blastp for -st prot) pass-2 over an already-prepared (db_fasta, qry_fasta) pair.
 
     Reproduces TEsorter2 master's: makeblastdb -> chunked parallel blastn ->
     outfmt6 parse -> SQLite -> classify_from_blast (qcovs+length filter, best by
@@ -221,7 +221,7 @@ def run_pass2_blast(qry_fasta, db_fasta, conn, classifications, db_seq_to_dbs,
         log.info("  pass-2 target FASTA is empty or missing; skipping blastn")
         return []
 
-    make_blast_db(db_fasta, seq_type="nucl")
+    make_blast_db(db_fasta, seq_type=seq_type)
 
     query_chunks = chunk_fasta(qry_fasta, n_processors, work)
     if not query_chunks:
@@ -235,7 +235,7 @@ def run_pass2_blast(qry_fasta, db_fasta, conn, classifications, db_seq_to_dbs,
     for chunk in query_chunks:
         out = chunk + ".blastout"
         blast_outputs.append(out)
-        args_list.append((chunk, db_fasta, out, "nucl", 1, blast_task))
+        args_list.append((chunk, db_fasta, out, seq_type, 1, blast_task))
     with multiprocessing.Pool(len(query_chunks)) as pool:
         pool.starmap(run_blast_chunk, args_list)
     t2 = time.time()

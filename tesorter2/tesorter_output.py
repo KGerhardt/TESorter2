@@ -49,11 +49,9 @@ def _format_gff_id(seq_id):
     return re.sub(r"[;=|]", "_", seq_id)
 
 
-# Hit tables these exports can read. The search path decides which one holds the
-# run's hits: the legacy/two-pass path writes legacy_hits, --facet writes
-# facet_hits. Table names cannot be bound parameters, so the name is validated
-# against this allowlist before being interpolated.
-_HITS_TABLES = ("legacy_hits", "facet_hits")
+# Hit tables these exports can read. Table names cannot be bound parameters,
+# so the name is validated against this allowlist before being interpolated.
+_HITS_TABLES = ("legacy_hits",)
 
 
 def _hits_query(columns, hits_table):

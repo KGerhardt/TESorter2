@@ -272,7 +272,9 @@ def splice_sub_hmm(src_hmm, start, end):
 
 def _load_hmms(hmm_path):
     """Load all HMMs from a file. Standalone version with no dependencies."""
-    with open(hmm_path, "rb") as fh:
+    import gzip as _gzip
+    opener = _gzip.open if str(hmm_path).endswith(".gz") else open
+    with opener(hmm_path, "rb") as fh:
         return list(plan7.HMMFile(io.BytesIO(fh.read())))
 
 
