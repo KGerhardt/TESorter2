@@ -41,6 +41,13 @@ docker build -f container/Dockerfile -t tesorter2:2.0.0 .
 docker run --rm -u $(id -u):$(id -g) -v "$PWD":/data tesorter2:2.0.0 TEsorter2 TEs.fa -p 8
 ```
 
+On HPC systems without Docker, Apptainer builds the same image unprivileged:
+
+```bash
+apptainer build tesorter2_2.0.0.sif container/tesorter2.def
+apptainer exec tesorter2_2.0.0.sif TEsorter2 TEs.fa -p 8
+```
+
 ### From source
 
 ```bash
@@ -101,8 +108,11 @@ TEsorter2 TElib.fa -db rexdb-plant -p 16
 
 This writes `TElib.fa.rexdb-plant.cls.tsv` and `TElib.fa.rexdb-plant.cls.lib`, the names TEsorter
 uses, with the calls of the TEsorter2 engine cascade. TEsorter's database names (`rexdb`,
-`rexdb-plant`, `rexdb-metazoa`, `gydb`, `rexdb-pnas`, `rexdb-line`, `sine`) work, as do
-TEsorter2's; `-db` also takes a comma-separated list, an HMM file, or `all`.
+`rexdb-plant`, `rexdb-metazoa`, `rexdb-v3`, `rexdb-plantv3`, `rexdb-metazoav3`, `gydb`,
+`rexdb-pnas`, `rexdb-line`, `sine`) work, as do TEsorter2's; `-db` also takes a comma-separated
+list, an HMM file, or `all`. TEsorter2 bundles one REXdb file (Viridiplantae v4.0 plus Metazoa
+v3.1), so all the `rexdb` names except `rexdb-pnas` and `rexdb-line` search that file; the name
+you give still names the output files.
 
 ### Annotate TE domains in a genome
 
@@ -153,11 +163,14 @@ TEsorter2 TElib.fa --pass2-aligner minimap2 -rule 80-80-80
 # Add a database to a finished run without searching everything again
 TEsorter2 TElib.fa --extend TElib.fa.TEsorter2.db -db dfam-extended
 
-# Output name and location; temporary files
+# Output name and location; temporary files (removed at the end, unless -nocln)
 TEsorter2 TElib.fa -pre results/mylib -tmp /scratch/tmp
+TEsorter2 TElib.fa -tmp /scratch/tmp -nocln
 ```
 
-Run `TEsorter2 -h` for the full list.
+Run `TEsorter2 -h` for the full list and `TEsorter2 -v` for the version. TEsorter's `-fw`,
+`-win_size` and `-win_ovl` are accepted and ignored: TEsorter2 keeps no hmmscan output to reuse
+and searches each chromosome whole.
 
 ## Choosing an engine
 
@@ -185,6 +198,7 @@ always searched with nhmmer.
 | `{prefix}.dom.gff3` | Genome mode: classified TE domain features |
 | `{prefix}.dom.fna` | Genome mode: sequence of each feature |
 | `{prefix}.genome.summary.tsv` | Genome mode: Order / Superfamily / Clade tallies |
+| `{prefix}.softmasked`, `{prefix}.hardmasked` | With `-mask`: input with its TE domains masked (lowercase, or `N`) |
 
 ## Benchmarks
 
@@ -208,8 +222,8 @@ If you use TEsorter2, please cite TEsorter2 (manuscript in preparation) and the 
 > LTR-retrotransposons in plant genomes. *Horticulture Research* 9: uhac017.
 > https://doi.org/10.1093/hr/uhac017
 
-Please also cite the databases you search; see
-[`tesorter2/database/LICENSES.md`](tesorter2/database/LICENSES.md).
+Please also cite the databases you search; `TEsorter2 -cite` prints every reference (including
+BATH), and [`tesorter2/database/LICENSES.md`](tesorter2/database/LICENSES.md) lists the sources.
 
 ## License
 
