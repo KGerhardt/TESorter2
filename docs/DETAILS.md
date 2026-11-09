@@ -339,8 +339,8 @@ MCC ≈ 0.857. The `blast_hits` table of the results database stores one row per
 ## TEsorter compatibility
 
 `TEsorter2` takes TEsorter's command line, so a TEsorter command keeps working when only the
-executable name changes; it runs the TEsorter2 search with TEsorter's file names. Where results
-must match TEsorter 1 exactly, `TEsorter` runs TEsorter's own pipeline: one database (rexdb by default), HMMER on the
+executable name changes; it runs the TEsorter2 search with TEsorter's file names. For workflows
+built around TEsorter 1, `TEsorter` runs TEsorter's own pipeline: one database (rexdb by default), HMMER on the
 six-frame translation, TEsorter's filters and count-based clade voting:
 
 ```bash

@@ -42,7 +42,7 @@ tesorter2-subset = "tesorter2.subset:main"
 TEsorter2 = "tesorter2.pipeline:main"
 # `TEsorter2` takes TEsorter's command line. `TEsorter` runs TEsorter's own
 # pipeline (one database, HMMER, count vote, every TEsorter file) for
-# pipelines such as EDTA that expect TEsorter 1 results exactly.
+# pipelines such as EDTA that expect TEsorter's pipeline and output files.
 TEsorter = "tesorter2.tesorter_compat:main"
 
 [tool.setuptools]

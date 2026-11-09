@@ -21,5 +21,6 @@ dependencies:
 # and the only protein engine of genome mode, is not on conda. Download a
 # prebuilt release from https://github.com/TravisWheelerLab/BATH/releases or
 # build it from source (see the README), then put it on PATH or set
-# BATH_BIN_DIR. Without it, `tesorter2 sequences` skips the BATH stage.
+# BATH_BIN_DIR. Without it, `TEsorter2` skips the BATH stage when classifying
+# TE sequences; `-genome` requires it.
 # The HMM databases ship inside the package: no download step is needed.

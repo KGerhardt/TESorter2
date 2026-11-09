@@ -133,7 +133,7 @@ TEsorter TElib.fa -db rexdb-plant -p 16
 
 TEsorter's search (one database, rexdb by default, HMMER only), filters and count-based clade vote,
 with every TEsorter file (`.cls.tsv`, `.cls.lib`, `.cls.pep`, `.dom.gff3`, `.dom.tsv`, `.dom.faa`).
-Use it where downstream tools expect TEsorter 1 results exactly, as EDTA does.
+Use it where downstream tools expect TEsorter's pipeline and output files, as EDTA does.
 
 ## Common options
 

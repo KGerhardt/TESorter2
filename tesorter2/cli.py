@@ -13,7 +13,7 @@ default and `-genome` switches to whole-genome domain annotation.
 
 `TEsorter2` with no -db searches every default database with the TEsorter2
 engine cascade. `TEsorter` runs TEsorter's own single-database pipeline
-(rexdb by default) for results identical to TEsorter 1.
+(rexdb by default) and writes TEsorter's output files.
 
 Accepted but left out of --help, so existing scripts keep working: the
 2.0.0 subcommand words (`tesorter2 sequences ...`, `tesorter2 genome ...`),
@@ -398,7 +398,7 @@ def mask_input(input_fasta, gff3, prefix, types, seq_type="nucl"):
 
 CITATION = """\
 If you use TEsorter2, please cite it (paper in preparation):
-Gerhardt K, Mahecha D. TEsorter2. https://github.com/KGerhardt/TEsorter2
+Mahecha D, Gerhardt K, et al. TEsorter2. https://github.com/KGerhardt/TEsorter2
 
 TEsorter2 builds on TEsorter:
 Zhang RG, Li GL, Wang XL et al. TEsorter: an accurate and fast method to
