@@ -11,8 +11,8 @@ Bootstrap: docker
 From: mambaorg/micromamba:1.5.10-bookworm-slim
 
 %arguments
-    BATH_COMMIT=4d2d38817224300f8087770fd4d5b095b9840960
-    EASEL_COMMIT=365a87aa2a5caf8d25f270ea6f4314fbff48523d
+    BATH_COMMIT=b65b6bb9cece997a782c2bdd7290be9df14e0d99
+    EASEL_COMMIT=74e45a88acaa6355eb330799a24e9d6edc798dc4
 
 %labels
     org.opencontainers.image.title TEsorter2
@@ -31,8 +31,8 @@ From: mambaorg/micromamba:1.5.10-bookworm-slim
     set -eu
     export DEBIAN_FRONTEND=noninteractive
 
-    # BATH is not on conda: build it from source, pinned to the commit used
-    # in the TEsorter2 benchmarks. SSE is selected explicitly so the binary
+    # BATH: build it from source, pinned to v2.0.0-rc7 + the easel commit of the
+    # bioconda bath recipe (used in the TEsorter2 benchmarks). SSE is selected explicitly so the binary
     # does not depend on the CPU of the build machine.
     apt-get update
     apt-get install -y --no-install-recommends build-essential autoconf git ca-certificates

@@ -2,9 +2,10 @@
 
 Docker and Apptainer images with TEsorter2 and every search engine of its
 cascade: pyhmmer/HMMER, nail (+MMseqs2) and BATH. BATH is not on conda, so it
-is compiled from source, pinned to the commit used in the TEsorter2
-benchmarks (BATH `4d2d388`, easel `365a87a`; see `/opt/bath/VERSION` inside
-the image).
+is compiled from source, pinned to the release used in the TEsorter2
+benchmarks: BATH v2.0.0-rc7 (`b65b6bb9`) with easel `74e45a88`, the same
+sources as the bioconda `bath` recipe (see `/opt/bath/VERSION` inside the
+image).
 
 ## Build
 

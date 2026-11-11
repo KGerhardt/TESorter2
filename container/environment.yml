@@ -15,5 +15,5 @@ dependencies:
   - blast=2.17.0       # pass-2 (default aligner)
   - minimap2=2.31      # pass-2 (--pass2-aligner minimap2)
   - nail=0.7.1         # cascade stage
-  - mmseqs2=17.b804f   # nail seeding
+  - mmseqs2=18.8cc5c   # nail seeding (version verified with nail 0.7.1, docs/DETAILS.md)
   - procps-ng          # `ps`, used by Nextflow/Snakemake wrappers

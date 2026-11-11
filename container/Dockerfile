@@ -5,12 +5,12 @@
 # Build from the repository root:
 #   docker build -f container/Dockerfile -t tesorter2:2.0.0 .
 #
-# BATH is not on conda, so it is compiled from source here, pinned to the
-# commit used in the TEsorter2 benchmarks. Override with --build-arg to
+# BATH is compiled from source here, pinned to v2.0.0-rc7 with the easel commit
+# of the bioconda bath recipe (the release used in the TEsorter2 benchmarks). Override with --build-arg to
 # change it.
 
-ARG BATH_COMMIT=4d2d38817224300f8087770fd4d5b095b9840960
-ARG EASEL_COMMIT=365a87aa2a5caf8d25f270ea6f4314fbff48523d
+ARG BATH_COMMIT=b65b6bb9cece997a782c2bdd7290be9df14e0d99
+ARG EASEL_COMMIT=74e45a88acaa6355eb330799a24e9d6edc798dc4
 
 # ---- stage 1: build BATH ----
 FROM debian:bookworm-slim AS bath
