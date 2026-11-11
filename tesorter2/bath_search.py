@@ -163,6 +163,12 @@ def resolve_bath_db(hmm_path, db_name=None):
     try:
         subprocess.run([_bin("bathconvert")] + (["--fs"] if fs else [])
                        + [tmp, hmm_path], check=True)
+        # mkstemp creates the file 0600; give the conversion the mode of an
+        # ordinary new file so other users can read it (shared installs, and
+        # container images built as one user and run as another).
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)
         shutil.move(tmp, cache)
     finally:
         if os.path.exists(tmp):
